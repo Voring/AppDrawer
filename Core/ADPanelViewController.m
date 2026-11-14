@@ -23,7 +23,7 @@ static CGFloat const kADGrabberLineWidth = 5.0;
 static CGFloat const kADGrabberTop = 6.0;
 // 展开/收起：0.33s，弹簧阻尼 1，easeOut；展开位移为自身高度的 1/3。
 static NSTimeInterval const kADPanelAnimationDuration = 0.33;
-// 下拉收起：100pt 内渐进淡出，速度超过 900 直接收。
+// 上推收起：100pt 内渐进淡出，速度超过 900 直接收。
 static CGFloat const kADFadeOutDistance = 100.0;
 static CGFloat const kADFastDismissVelocity = 900.0;
 
@@ -315,24 +315,29 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     self.blurView.layer.cornerRadius = radius;
     self.materialTintView.frame = self.blurView.contentView.bounds;
 
+    // 面板在上半屏：交互元素全部贴底，列表在上方。
     CGFloat cardWidthActual = CGRectGetWidth(self.cardView.bounds);
+    CGFloat cardHeightActual = CGRectGetHeight(self.cardView.bounds);
+
+    CGFloat grabberY = cardHeightActual - kADGrabberTop - kADGrabberHeight;
     self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
-                                        kADGrabberTop,
+                                        grabberY,
                                         kADGrabberWidth,
                                         kADGrabberHeight);
 
     CGFloat horizontalInset = 8.0;
-    CGFloat searchTop = CGRectGetMaxY(self.grabberView.frame) + 2.0;
+    CGFloat searchHeight = 48.0;
+    CGFloat searchY = grabberY - 2.0 - searchHeight;
     self.searchBar.frame = CGRectMake(horizontalInset,
-                                      searchTop,
+                                      searchY,
                                       cardWidthActual - horizontalInset * 2.0,
-                                      48.0);
+                                      searchHeight);
 
-    CGFloat listTop = CGRectGetMaxY(self.searchBar.frame);
+    CGFloat listTop = 8.0;
     self.collectionView.frame = CGRectMake(0.0,
                                            listTop,
                                            cardWidthActual,
-                                           CGRectGetHeight(self.cardView.bounds) - listTop - 4.0);
+                                           MAX(searchY - listTop, 0.0));
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
 }
 
@@ -445,8 +450,9 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 - (void)animateIn {
     [self.view layoutIfNeeded];
 
+    // 面板贴顶，所以展开位移取负值：从上方落下来（与下半屏的 Kayoko 镜像）。
     _cardView.transform = CGAffineTransformMakeTranslation(0.0,
-                                                           CGRectGetHeight(self.cardView.bounds) / 3.0);
+                                                           -CGRectGetHeight(self.cardView.bounds) / 3.0);
     _cardView.alpha = 0.0;
     _dimView.alpha = 0.0;
 
@@ -522,14 +528,15 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     if (recognizer.state == UIGestureRecognizerStateChanged) {
-        if (translation.y < 0.0 && !_panDidFadeOut) {
+        // 上半屏面板只接受「向上推」：translation.y 为负。
+        if (translation.y > 0.0 && !_panDidFadeOut) {
             return;
         }
-        CGFloat fadeProgress = MIN(MAX(translation.y / kADFadeOutDistance, 0.0), 1.0);
+        CGFloat fadeProgress = MIN(MAX(-translation.y / kADFadeOutDistance, 0.0), 1.0);
         if (_panDidFadeOut || fadeProgress >= 1.0) {
             _panDidFadeOut = YES;
             fadeProgress = 1.0;
-            translation.y = MAX(translation.y, kADFadeOutDistance);
+            translation.y = MIN(translation.y, -kADFadeOutDistance);
         }
         [UIView animateWithDuration:0.1
                               delay:0.0
@@ -554,7 +561,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     BOOL fastDismiss = (recognizer.state == UIGestureRecognizerStateEnded) && !_panDidFadeOut &&
-                       translation.y > 0.0 && velocity.y >= kADFastDismissVelocity;
+                       translation.y < 0.0 && velocity.y <= -kADFastDismissVelocity;
     if (_panDidFadeOut || fastDismiss) {
         if (self.onRequestClose) {
             self.onRequestClose();
@@ -588,17 +595,22 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.cardView];
-    if (velocity.y <= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
+    // 只接管向上滑动（translation/velocity 为负）。
+    if (velocity.y >= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
         return NO;
     }
 
-    // 列表已经滚走时，下拉优先给列表滚动，只有回到顶部才接管为收起手势。
+    // 列表还能向下滚时，上推优先给列表；滚到底了才接管为收起手势。
     CGPoint location = [gestureRecognizer locationInView:self.cardView];
     if (CGRectContainsPoint(self.collectionView.frame, location)) {
-        CGFloat topBoundary = -self.collectionView.adjustedContentInset.top;
-        return self.collectionView.contentOffset.y <= topBoundary + 0.5 &&
-               self.collectionView.contentSize.height >
-                   CGRectGetHeight(self.collectionView.bounds);
+        UIEdgeInsets insets = self.collectionView.adjustedContentInset;
+        CGFloat bottomBoundary =
+            self.collectionView.contentSize.height - CGRectGetHeight(self.collectionView.bounds) +
+            insets.bottom;
+        if (bottomBoundary <= 0.0) {
+            return YES;
+        }
+        return self.collectionView.contentOffset.y >= bottomBoundary - 0.5;
     }
     return YES;
 }
