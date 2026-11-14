@@ -272,6 +272,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
             [self applyMaterialAppearance];
         }
     }
+    [self layoutPanel];
 }
 
 // 圆角按屏幕物理圆角推导：displayCornerRadius - 3，夹在 28...54 之间。
@@ -295,14 +296,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 #pragma mark - 布局
 
 - (BOOL)isLandscapeInterface {
-    // 面板窗口的 frame 直接取 scene.coordinateSpace.bounds，横屏时它就是 852x393，
-    // 所以「窗口宽 > 高」是最可靠的方向判据。SpringBoard 自己的场景恒报竖屏，
-    // 不能靠 scene.interfaceOrientation 判断。
-    CGSize windowSize = self.view.window.bounds.size;
-    if (windowSize.width > 0.0 && windowSize.height > 0.0 &&
-        fabs(windowSize.width - windowSize.height) > 1.0) {
-        return windowSize.width > windowSize.height;
-    }
     UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
     if (@available(iOS 13.0, *)) {
         UIWindowScene *scene = self.view.window.windowScene;
@@ -311,7 +304,11 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         }
     }
     if (orientation == UIInterfaceOrientationUnknown) {
-        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        // 16.5 SDK 上 statusBarOrientation 已 deprecated，这里改用窗口尺寸判断。
+        CGSize screenSize = self.view.window.frame.size;
+        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
+            screenSize = [UIScreen mainScreen].bounds.size;
+        }
         return screenSize.width > screenSize.height;
     }
     return UIInterfaceOrientationIsLandscape(orientation);
