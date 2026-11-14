@@ -6,37 +6,30 @@
 #import "ADAppInfo.h"
 #import "ADPrefs.h"
 
+// 重写版（1.3.0）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
+// 没有任何 isLandscape 判定、没有任何 view.frame / transform 的强制改写。
+
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 
-// —— 以下视觉/动效参数与 Voring/Kayoko-1 的 Core/Presentation + Core/Views 对齐 ——
-// 面板：悬浮卡片，四角连续圆角（半径取自屏幕 displayCornerRadius - 3），阴影 0.28。
-static CGFloat const kADPanelHorizontalInset = 8.0;
-static CGFloat const kADPanelVerticalGap = 8.0;
+static CGFloat const kADPanelSideInset = 8.0;
+static CGFloat const kADPanelBottomGap = 8.0;
+static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
+static CGFloat const kADPanelMinHeight = 200.0;
 static CGFloat const kADPanelShadowOpacity = 0.28;
 static CGFloat const kADPanelShadowRadius = 8.0;
 static CGFloat const kADPanelCornerRadiusMin = 28.0;
 static CGFloat const kADPanelCornerRadiusMax = 54.0;
-// 抓杆：42 x 14，线宽 5，labelColor 22% 透明度。
 static CGFloat const kADGrabberWidth = 42.0;
 static CGFloat const kADGrabberHeight = 14.0;
 static CGFloat const kADGrabberLineWidth = 5.0;
-static CGFloat const kADGrabberTop = 6.0;
-// 竖屏面板高度在偏好值（默认 55%）基础上再缩到 2/3（约屏幕的 37%）。
-static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
-static CGFloat const kADPanelPortraitMinHeight = 260.0;
-// 横屏：宽度取屏幕 1/2，水平居中；高度在偏好值上再缩 1/4，贴近顶部（约两条抓杆的高度）。
-static CGFloat const kADPanelLandscapeWidthFraction = 0.5;
-static CGFloat const kADPanelLandscapeHeightScale = 0.75;
-static CGFloat const kADPanelLandscapeTopGap = 28.0;
-static CGFloat const kADPanelLandscapeMinHeight = 180.0;
-// 展开/收起：0.33s，弹簧阻尼 1，easeOut；展开位移为自身高度的 1/3。
+static CGFloat const kADGrabberInset = 6.0;
+static CGFloat const kADSearchHeight = 48.0;
+static CGFloat const kADListTopInset = 8.0;
 static NSTimeInterval const kADPanelAnimationDuration = 0.33;
-// 上推收起：60pt 内渐进淡出，速度超过 900 直接收。
 static CGFloat const kADFadeOutDistance = 60.0;
 static CGFloat const kADFastDismissVelocity = 900.0;
 
 @interface ADGrabberView : UIView
-@property (nonatomic, strong) CAShapeLayer *lineLayer;
 @end
 
 @implementation ADGrabberView
@@ -44,37 +37,23 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        _lineLayer = [CAShapeLayer layer];
-        _lineLayer.lineWidth = kADGrabberLineWidth;
-        _lineLayer.lineCap = kCALineCapRound;
-        _lineLayer.lineJoin = kCALineJoinRound;
-        _lineLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.22].CGColor;
-        [self.layer addSublayer:_lineLayer];
-        self.contentMode = UIViewContentModeRedraw;
         self.backgroundColor = [UIColor clearColor];
+        self.contentMode = UIViewContentModeRedraw;
     }
     return self;
 }
 
-- (CGSize)intrinsicContentSize {
-    return CGSizeMake(kADGrabberWidth, kADGrabberHeight);
-}
-
-// 抓杆本身只有 42x14，但可点区域按 Kayoko 的 CGRectInset(-44, -16) 放大。
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
     return CGRectContainsPoint(CGRectInset(self.bounds, -44.0, -16.0), point);
 }
 
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    _lineLayer.frame = self.bounds;
+- (void)drawRect:(CGRect)rect {
+    [[[UIColor labelColor] colorWithAlphaComponent:0.22] setStroke];
     UIBezierPath *path = [UIBezierPath bezierPath];
-    CGPoint start = CGPointMake(2.0, CGRectGetMidY(self.bounds));
-    CGPoint end = CGPointMake(CGRectGetWidth(self.bounds) - 2.0, CGRectGetMidY(self.bounds));
-    [path moveToPoint:start];
-    [path addLineToPoint:end];
-    _lineLayer.path = path.CGPath;
-    _lineLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.22].CGColor;
+    path.lineWidth = kADGrabberLineWidth;
+    [path moveToPoint:CGPointMake(2.0, CGRectGetMidY(self.bounds))];
+    [path addLineToPoint:CGPointMake(CGRectGetWidth(self.bounds) - 2.0, CGRectGetMidY(self.bounds))];
+    [path stroke];
 }
 
 @end
@@ -83,11 +62,9 @@ static CGFloat const kADFastDismissVelocity = 900.0;
                                      UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate>
 
 @property (nonatomic, strong) UIView *dimView;
-// 承载阴影的透明外壳；真正的裁剪在 chromeClipView 上（阴影与裁剪必须分层）。
 @property (nonatomic, strong) UIView *cardView;
-@property (nonatomic, strong) UIView *chromeClipView;
 @property (nonatomic, strong) UIVisualEffectView *blurView;
-@property (nonatomic, strong) UIView *materialTintView;
+@property (nonatomic, strong) UIView *tintView;
 @property (nonatomic, strong) ADGrabberView *grabberView;
 @property (nonatomic, strong) UISearchBar *searchBar;
 @property (nonatomic, strong) UICollectionView *collectionView;
@@ -120,8 +97,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
     _cardView = [[UIView alloc] init];
     _cardView.backgroundColor = [UIColor clearColor];
-    _cardView.opaque = NO;
-    _cardView.clipsToBounds = NO;
+    _cardView.clipsToBounds = YES;
     _cardView.layer.cornerCurve = kCACornerCurveContinuous;
     _cardView.layer.shadowColor = [UIColor blackColor].CGColor;
     _cardView.layer.shadowOffset = CGSizeMake(0.0, 1.0);
@@ -129,34 +105,19 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     _cardView.layer.shadowOpacity = kADPanelShadowOpacity;
     [self.view addSubview:_cardView];
 
-    _chromeClipView = [[UIView alloc] init];
-    _chromeClipView.backgroundColor = [UIColor clearColor];
-    _chromeClipView.opaque = NO;
-    _chromeClipView.clipsToBounds = YES;
-    _chromeClipView.layer.cornerCurve = kCACornerCurveContinuous;
-    [_cardView addSubview:_chromeClipView];
-
     _blurView = [[UIVisualEffectView alloc] initWithEffect:[self preferredBlurEffect]];
     _blurView.backgroundColor = [UIColor clearColor];
-    _blurView.opaque = NO;
-    _blurView.contentView.backgroundColor = [UIColor clearColor];
-    _blurView.contentView.opaque = NO;
-    _blurView.layer.masksToBounds = YES;
-    _blurView.layer.cornerCurve = kCACornerCurveContinuous;
-    [_chromeClipView addSubview:_blurView];
+    [_cardView addSubview:_blurView];
 
-    _materialTintView = [[UIView alloc] init];
-    _materialTintView.userInteractionEnabled = NO;
-    _materialTintView.backgroundColor = [self preferredMaterialTintColor];
-    [_blurView.contentView addSubview:_materialTintView];
+    _tintView = [[UIView alloc] init];
+    _tintView.userInteractionEnabled = NO;
+    _tintView.backgroundColor = [self preferredTintColor];
+    [_blurView.contentView addSubview:_tintView];
 
     _grabberView = [[ADGrabberView alloc] initWithFrame:CGRectZero];
-    [_chromeClipView addSubview:_grabberView];
-    // 点抓杆 = 收起（Kayoko 的 grabber tap 行为）；手势挂在抓杆自己身上，
-    // 不能挂到卡片上，否则点列表格子会被这个 tap 吃掉。
-    UITapGestureRecognizer *grabberTap =
-        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleGrabberTap)];
-    [_grabberView addGestureRecognizer:grabberTap];
+    [_cardView addSubview:_grabberView];
+    [_grabberView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                              action:@selector(handleGrabberTap)]];
 
     _searchBar = [[UISearchBar alloc] init];
     _searchBar.delegate = self;
@@ -171,7 +132,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     _searchBar.searchTextField.textColor = [UIColor labelColor];
     _searchBar.searchTextField.clearButtonMode = UITextFieldViewModeWhileEditing;
     _searchBar.searchTextField.enablesReturnKeyAutomatically = NO;
-    [_chromeClipView addSubview:_searchBar];
+    [_cardView addSubview:_searchBar];
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.minimumLineSpacing = 14.0;
@@ -185,11 +146,11 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     _collectionView.dataSource = self;
     _collectionView.delegate = self;
     _collectionView.contentInset = UIEdgeInsetsMake(2.0, 0.0, 16.0, 0.0);
-    // 面板在上半屏、交互条贴底：列表按「从下往上」铺，第一项落在最靠近搜索框的底部。
+    // 交互条在最下方，所以列表按「从下往上」铺，第一项贴着搜索框。
     _collectionView.transform = CGAffineTransformMakeScale(1.0, -1.0);
     [_collectionView registerClass:[ADAppCell class]
         forCellWithReuseIdentifier:ADAppCellReuseIdentifier];
-    [_chromeClipView addSubview:_collectionView];
+    [_cardView addSubview:_collectionView];
 
     _emptyLabel = [[UILabel alloc] init];
     _emptyLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightRegular];
@@ -197,7 +158,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     _emptyLabel.textAlignment = NSTextAlignmentCenter;
     _emptyLabel.numberOfLines = 0;
     _emptyLabel.text = @"正在读取已安装 App…";
-    [_chromeClipView addSubview:_emptyLabel];
+    [_cardView addSubview:_emptyLabel];
 
     _panGestureRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self
                                                                     action:@selector(handlePanGesture:)];
@@ -209,8 +170,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-
-    // 面板是搜索型 UI：一出来就给键盘，同时也验证 window 是否真的拿到了 key。
     [self.view.window makeKeyWindow];
     [self focusSearchField];
 }
@@ -220,8 +179,15 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     [self layoutPanel];
 }
 
-- (void)viewSafeAreaInsetsDidChange {
-    [super viewSafeAreaInsetsDidChange];
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (@available(iOS 13.0, *)) {
+        if (previousTraitCollection &&
+            previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+            _blurView.effect = [self preferredBlurEffect];
+            _tintView.backgroundColor = [self preferredTintColor];
+        }
+    }
     [self layoutPanel];
 }
 
@@ -229,53 +195,24 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 - (BOOL)prefersDarkMaterial {
     if (@available(iOS 13.0, *)) {
-        if (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
-            return YES;
-        }
+        return self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
     }
     return NO;
 }
 
-// 与 Kayoko 一致：SystemThinMaterial（而不是厚的 SystemMaterial），
-// 背后能透出一点壁纸，观感更轻。
 - (UIBlurEffect *)preferredBlurEffect {
-    NSInteger style = ADPrefBlurStyle();
-    if (style != UIBlurEffectStyleSystemMaterial) {
-        // 用户在偏好里显式指定了样式，尊重设置。
-        return [UIBlurEffect effectWithStyle:(UIBlurEffectStyle)style];
-    }
     if (@available(iOS 13.0, *)) {
         return [UIBlurEffect effectWithStyle:[self prefersDarkMaterial]
-                                                   ? UIBlurEffectStyleSystemThinMaterialDark
-                                                   : UIBlurEffectStyleSystemThinMaterialLight];
+                                                ? UIBlurEffectStyleSystemThinMaterialDark
+                                                : UIBlurEffectStyleSystemThinMaterialLight];
     }
     return [UIBlurEffect effectWithStyle:UIBlurEffectStyleRegular];
 }
 
-- (UIColor *)preferredMaterialTintColor {
-    if ([self prefersDarkMaterial]) {
-        return [UIColor colorWithWhite:1.0 alpha:0.06];
-    }
-    return [UIColor colorWithWhite:1.0 alpha:0.34];
+- (UIColor *)preferredTintColor {
+    return [UIColor colorWithWhite:1.0 alpha:[self prefersDarkMaterial] ? 0.06 : 0.34];
 }
 
-- (void)applyMaterialAppearance {
-    _blurView.effect = [self preferredBlurEffect];
-    _materialTintView.backgroundColor = [self preferredMaterialTintColor];
-}
-
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    if (@available(iOS 13.0, *)) {
-        if (previousTraitCollection &&
-            previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
-            [self applyMaterialAppearance];
-        }
-    }
-    [self layoutPanel];
-}
-
-// 圆角按屏幕物理圆角推导：displayCornerRadius - 3，夹在 28...54 之间。
 - (CGFloat)resolvedCornerRadius {
     CGFloat radius = ADPrefPanelCornerRadius();
     UIScreen *screen = self.view.window.windowScene.screen ?: [UIScreen mainScreen];
@@ -288,46 +225,11 @@ static CGFloat const kADFastDismissVelocity = 900.0;
             radius = MAX(radius, [value doubleValue] - 3.0);
         }
     } @catch (__unused NSException *exception) {
-        // 取不到就退回偏好值。
     }
     return MAX(kADPanelCornerRadiusMin, MIN(kADPanelCornerRadiusMax, radius));
 }
 
-#pragma mark - 布局
-
-- (BOOL)isLandscapeInterface {
-    UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
-    if (@available(iOS 13.0, *)) {
-        UIWindowScene *scene = self.view.window.windowScene;
-        if (scene) {
-            orientation = scene.interfaceOrientation;
-        }
-    }
-    if (orientation == UIInterfaceOrientationUnknown) {
-        // 16.5 SDK 上 statusBarOrientation 已 deprecated，这里改用窗口尺寸判断。
-        CGSize screenSize = self.view.window.frame.size;
-        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
-            screenSize = [UIScreen mainScreen].bounds.size;
-        }
-        return screenSize.width > screenSize.height;
-    }
-    return UIInterfaceOrientationIsLandscape(orientation);
-}
-
-// 收起手势的方向系数：竖屏向上推（负），横屏向下拉（正）。
-- (CGFloat)panDismissSign {
-    return [self isLandscapeInterface] ? 1.0 : -1.0;
-}
-
-// 单行网格高度（图标 + 名字），用于把面板整体下移一格。
-- (CGFloat)gridRowHeightForWidth:(CGFloat)width {
-    NSInteger columns = ADPrefColumns();
-    CGFloat horizontalInsets = 32.0;
-    CGFloat spacing = (CGFloat)(columns - 1) * 4.0;
-    CGFloat itemWidth = floor((width - horizontalInsets - spacing) / (CGFloat)columns);
-    CGFloat iconSide = MIN(floor(itemWidth * 0.82), 62.0);
-    return iconSide + 34.0;
-}
+#pragma mark - 布局（一套参数，横屏自然拉伸）
 
 - (void)layoutPanel {
     CGFloat width = CGRectGetWidth(self.view.bounds);
@@ -336,31 +238,16 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         return;
     }
 
-    BOOL landscape = [self isLandscapeInterface];
-    CGFloat topInset = MAX(self.view.safeAreaInsets.top, 20.0);
+    UIEdgeInsets safeArea = self.view.safeAreaInsets;
+    CGFloat bottomInset = MAX(safeArea.bottom, 0.0);
 
-    CGFloat cardWidth = 0.0;
-    CGFloat cardHeight = 0.0;
-    CGFloat originX = 0.0;
-    CGFloat originY = 0.0;
-
-    if (landscape) {
-        // 横屏：半宽、水平居中，贴近顶部，交互条在上方。
-        cardWidth = floor(width * kADPanelLandscapeWidthFraction);
-        cardHeight = floor(height * ADPrefPanelHeightPercent() * kADPanelLandscapeHeightScale);
-        cardHeight = MAX(cardHeight, kADPanelLandscapeMinHeight);
-        cardHeight = MIN(cardHeight, height - kADPanelLandscapeTopGap - kADPanelVerticalGap);
-        originX = floor((width - cardWidth) / 2.0);
-        originY = kADPanelLandscapeTopGap;
-    } else {
-        // 竖屏：整体下移一格（正好一个图标格的高度，和网格行高保持一致）。
-        cardWidth = width - kADPanelHorizontalInset * 2.0;
-        cardHeight = floor((height - topInset) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
-        cardHeight = MAX(cardHeight, kADPanelPortraitMinHeight);
-        cardHeight = MIN(cardHeight, height - topInset - kADPanelVerticalGap);
-        originX = kADPanelHorizontalInset;
-        originY = topInset + [self gridRowHeightForWidth:cardWidth];
-    }
+    CGFloat cardWidth = width - kADPanelSideInset * 2.0;
+    CGFloat cardHeight = floor((height - safeArea.top) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
+    cardHeight = MAX(cardHeight, kADPanelMinHeight);
+    cardHeight = MIN(cardHeight, height - safeArea.top - kADPanelBottomGap - bottomInset);
+    CGFloat originX = kADPanelSideInset;
+    // 竖屏贴底；横屏也是同一句，只是画布变宽，于是整体呈现为「竖屏布局的拉伸」。
+    CGFloat originY = height - bottomInset - cardHeight - kADPanelBottomGap;
 
     self.dimView.frame = self.view.bounds;
 
@@ -370,54 +257,31 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     self.cardView.layer.shadowPath =
         [UIBezierPath bezierPathWithRoundedRect:self.cardView.bounds cornerRadius:radius].CGPath;
 
-    self.chromeClipView.frame = self.cardView.bounds;
-    self.chromeClipView.layer.cornerRadius = radius;
-    self.chromeClipView.layer.maskedCorners =
-        kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
-
-    self.blurView.frame = self.chromeClipView.bounds;
+    self.blurView.frame = self.cardView.bounds;
     self.blurView.layer.cornerRadius = radius;
-    self.materialTintView.frame = self.blurView.contentView.bounds;
+    self.blurView.layer.masksToBounds = YES;
+    self.tintView.frame = self.blurView.contentView.bounds;
 
     CGFloat cardWidthActual = CGRectGetWidth(self.cardView.bounds);
     CGFloat cardHeightActual = CGRectGetHeight(self.cardView.bounds);
     CGFloat horizontalInset = 8.0;
-    CGFloat searchHeight = 48.0;
 
-    if (landscape) {
-        // 横屏：抓杆在上，搜索框紧随其后，列表在下方。
-        self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
-                                            kADGrabberTop,
-                                            kADGrabberWidth,
-                                            kADGrabberHeight);
-        CGFloat searchY = CGRectGetMaxY(self.grabberView.frame) + 2.0;
-        self.searchBar.frame = CGRectMake(horizontalInset,
-                                          searchY,
-                                          cardWidthActual - horizontalInset * 2.0,
-                                          searchHeight);
-        CGFloat listTop = CGRectGetMaxY(self.searchBar.frame);
-        self.collectionView.frame = CGRectMake(0.0,
-                                               listTop,
-                                               cardWidthActual,
-                                               MAX(cardHeightActual - listTop - 4.0, 0.0));
-    } else {
-        // 竖屏：交互元素全部贴底，列表在上方。
-        CGFloat grabberY = cardHeightActual - kADGrabberTop - kADGrabberHeight;
-        self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
-                                            grabberY,
-                                            kADGrabberWidth,
-                                            kADGrabberHeight);
-        CGFloat searchY = grabberY - 2.0 - searchHeight;
-        self.searchBar.frame = CGRectMake(horizontalInset,
-                                          searchY,
-                                          cardWidthActual - horizontalInset * 2.0,
-                                          searchHeight);
-        CGFloat listTop = 8.0;
-        self.collectionView.frame = CGRectMake(0.0,
-                                               listTop,
-                                               cardWidthActual,
-                                               MAX(searchY - listTop, 0.0));
-    }
+    CGFloat grabberY = cardHeightActual - kADGrabberInset - kADGrabberHeight;
+    self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
+                                        grabberY,
+                                        kADGrabberWidth,
+                                        kADGrabberHeight);
+
+    CGFloat searchY = grabberY - 2.0 - kADSearchHeight;
+    self.searchBar.frame = CGRectMake(horizontalInset,
+                                      searchY,
+                                      cardWidthActual - horizontalInset * 2.0,
+                                      kADSearchHeight);
+
+    self.collectionView.frame = CGRectMake(0.0,
+                                           kADListTopInset,
+                                           cardWidthActual,
+                                           MAX(searchY - kADListTopInset, 0.0));
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
 }
 
@@ -441,18 +305,14 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 - (void)setApplications:(NSArray<ADAppInfo *> *)applications {
     NSArray<ADAppInfo *> *incoming = applications ?: @[];
-
-    // 内容没变就什么都不做：这是打开面板时列表「闪一下」的主要原因
-    // （后台重载回来的同一份列表触发了 reloadData 并重置了滚动位置）。
-    if ([self _applications:incoming equalTo:self.allApplications]) {
+    if ([self applications:incoming equalTo:self.allApplications]) {
         return;
     }
-
     self.allApplications = incoming;
     [self applyFilterResettingOffset:NO];
 }
 
-- (BOOL)_applications:(NSArray<ADAppInfo *> *)lhs equalTo:(NSArray<ADAppInfo *> *)rhs {
+- (BOOL)applications:(NSArray<ADAppInfo *> *)lhs equalTo:(NSArray<ADAppInfo *> *)rhs {
     if (lhs.count != rhs.count) {
         return NO;
     }
@@ -473,19 +333,14 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     [self applyFilterResettingOffset:YES];
 }
 
-- (NSString *)_normalizedQuery {
-    NSString *raw = self.searchBar.text ?: @"";
-    NSString *trimmed = [raw stringByTrimmingCharactersInSet:
-                                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return [trimmed lowercaseString];
-}
-
 - (void)applyFilter {
     [self applyFilterResettingOffset:NO];
 }
 
 - (void)applyFilterResettingOffset:(BOOL)resetsOffset {
-    NSString *query = [self _normalizedQuery];
+    NSString *raw = self.searchBar.text ?: @"";
+    NSString *query = [[raw stringByTrimmingCharactersInSet:
+                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
     BOOL queryChanged = !(self.lastAppliedQuery == nil ? (query.length == 0)
                                                        : [self.lastAppliedQuery isEqualToString:query]);
     self.lastAppliedQuery = query;
@@ -493,12 +348,12 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     if (query.length == 0) {
         self.filteredApplications = self.allApplications ?: @[];
     } else {
-        NSString *compactQuery = [query stringByReplacingOccurrencesOfString:@" " withString:@""];
+        NSString *compact = [query stringByReplacingOccurrencesOfString:@" " withString:@""];
         NSMutableArray<ADAppInfo *> *matches = [NSMutableArray array];
         for (ADAppInfo *application in self.allApplications) {
             NSString *key = application.searchKey;
             if ([key rangeOfString:query].location != NSNotFound ||
-                (compactQuery.length && [key rangeOfString:compactQuery].location != NSNotFound)) {
+                (compact.length && [key rangeOfString:compact].location != NSNotFound)) {
                 [matches addObject:application];
             }
         }
@@ -518,7 +373,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         self.emptyLabel.hidden = YES;
     }
 
-    // 只有搜索词真的变了才回到起点，后台刷新不能把用户正在看的位置弹走。
     if (resetsOffset || queryChanged) {
         if (self.filteredApplications.count > 0) {
             [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.contentInset.top)
@@ -532,9 +386,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 - (void)animateIn {
     [self.view layoutIfNeeded];
 
-    // 面板贴顶，所以展开位移取负值：从上方落下来（与下半屏的 Kayoko 镜像）。
     _cardView.transform = CGAffineTransformMakeTranslation(0.0,
-                                                           -CGRectGetHeight(self.cardView.bounds) / 3.0);
+                                                           CGRectGetHeight(self.cardView.bounds) / 3.0);
     _cardView.alpha = 0.0;
     _dimView.alpha = 0.0;
 
@@ -610,16 +463,15 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     if (recognizer.state == UIGestureRecognizerStateChanged) {
-        // 竖屏只接受上推（负），横屏只接受下拉（正）。
-        CGFloat sign = [self panDismissSign];
-        if (translation.y * sign < 0.0 && !_panDidFadeOut) {
+        // 收起方向固定为「向上推」。
+        if (translation.y > 0.0 && !_panDidFadeOut) {
             return;
         }
-        CGFloat fadeProgress = MIN(MAX(translation.y * sign / kADFadeOutDistance, 0.0), 1.0);
+        CGFloat fadeProgress = MIN(MAX(-translation.y / kADFadeOutDistance, 0.0), 1.0);
         if (_panDidFadeOut || fadeProgress >= 1.0) {
             _panDidFadeOut = YES;
             fadeProgress = 1.0;
-            translation.y = sign * kADFadeOutDistance;
+            translation.y = -kADFadeOutDistance;
         }
         [UIView animateWithDuration:0.1
                               delay:0.0
@@ -643,9 +495,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         return;
     }
 
-    CGFloat sign = [self panDismissSign];
     BOOL fastDismiss = (recognizer.state == UIGestureRecognizerStateEnded) && !_panDidFadeOut &&
-                       translation.y * sign > 0.0 && velocity.y * sign >= kADFastDismissVelocity;
+                       translation.y < 0.0 && velocity.y <= -kADFastDismissVelocity;
     if (_panDidFadeOut || fastDismiss) {
         if (self.onRequestClose) {
             self.onRequestClose();
@@ -679,19 +530,13 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.cardView];
-    CGFloat sign = [self panDismissSign];
-    if (velocity.y * sign <= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
+    if (velocity.y >= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
         return NO;
     }
 
-    // 列表还有滚动余量时，拖动优先给列表；到达边界才接管为收起手势。
     CGPoint location = [gestureRecognizer locationInView:self.cardView];
     if (CGRectContainsPoint(self.collectionView.frame, location)) {
         UIEdgeInsets insets = self.collectionView.adjustedContentInset;
-        if ([self isLandscapeInterface]) {
-            // 横屏下拉：列表回到起点才收。
-            return self.collectionView.contentOffset.y <= -insets.top + 0.5;
-        }
         CGFloat bottomBoundary =
             self.collectionView.contentSize.height - CGRectGetHeight(self.collectionView.bounds) +
             insets.bottom;
@@ -706,7 +551,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 #pragma mark - UISearchBarDelegate
 
 - (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
-    // SpringBoard 会不时把自己的主窗口抢回 key window，这里再抢一次保证键盘有落点。
     [self.view.window makeKeyWindow];
     [searchBar setShowsCancelButton:YES animated:YES];
 }
@@ -737,7 +581,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
                   cellForItemAtIndexPath:(NSIndexPath *)indexPath {
     ADAppCell *cell = (ADAppCell *)[collectionView dequeueReusableCellWithReuseIdentifier:ADAppCellReuseIdentifier
                                                                              forIndexPath:indexPath];
-    // collectionView 整体做了纵向翻转，cell 内容再翻回来，文字与图标才是正的。
     cell.contentView.transform = CGAffineTransformMakeScale(1.0, -1.0);
     if (indexPath.item < (NSInteger)self.filteredApplications.count) {
         [cell configureWithApplication:self.filteredApplications[indexPath.item]];
