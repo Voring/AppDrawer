@@ -8,32 +8,48 @@
 #import "ADLauncher.h"
 #import "ADPanelViewController.h"
 
-#pragma mark - 面板窗口
+// 重写版（1.3.0）：
+// 1) 面板窗口仍然用「自己新建一个 SpringBoard 窗口实例」的方式，绝不嵌进 SpringBoard 的 key window。
+// 2) 窗口优先挂到「真正持有键盘窗口的那个场景」，这样 becomeFirstResponder 之后系统才愿意
+//    在这个场景里建立文本输入会话；找不到键盘场景时退回窗口最多的场景（SpringBoard 主场景）。
+// 3) 面板窗口尺寸取所挂场景的坐标空间，横屏时自然得到 852×393。
+// 4) 不做任何同步磁盘写入：诊断行改为后台队列、定长环形（最多 24 行），且只在唤出时写。
 
-// 独立面板窗口：1.0.3 起固定用这个，不再嵌进 SpringBoard 自己的窗口。
-// 1.0.2 嵌进 SpringBoard key window 的那次导致主线程卡死 + 覆盖层永久残留，
-// 不能再走。
-//
-// 1.1.9：窗口优先创建成 SpringBoard 的 SBWindow 实例（SBTransientOverlayWindow >
-// SBWindow > SBFWindow > 裸 UIWindow 依次尝试），并把每一步的结果写进 diag。
-// 原因：1.1.7 尝试过 SBWindow，但真机日志显示最后回落成裸 UIWindow，
-// 而失败原因只 NSLog 到了系统日志、没进 diag，等于白试一次。
-// 注意：仍然是「我们自己新建一个窗口实例」，不是把面板塞进 SpringBoard 现有
-// 的 key window。
 static NSString *const ADPanelTraitsRole = @"SBTraitsParticipantRoleTransientOverlay";
 static NSString *const ADPanelDebugName = @"AppDrawerPanel";
 
-static void ADAppendDiagLine(NSString *line);
+#pragma mark - 诊断（后台、定长、绝不阻塞主线程）
 
-// 窗口创建过程的诊断记录，创建完成后一次性写进 diag。
-static NSMutableString *ADWindowDiagLog(void) {
-    static NSMutableString *log;
+static void ADDiagLine(NSString *line) {
+    if (line.length == 0) {
+        return;
+    }
+    static dispatch_queue_t queue;
+    static NSMutableArray<NSString *> *lines;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-      log = [NSMutableString string];
+      queue = dispatch_queue_create("com.voring.appdrawer.panel.diag", DISPATCH_QUEUE_SERIAL);
+      lines = [NSMutableArray array];
     });
-    return log;
+    dispatch_async(queue, ^{
+      [lines addObject:line];
+      while (lines.count > 24) {
+          [lines removeObjectAtIndex:0];
+      }
+      NSString *directory = ADRequestDirectoryPath();
+      [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:NULL];
+      NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
+      [[lines componentsJoinedByString:@"\n"] writeToFile:path
+                                               atomically:YES
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+    });
 }
+
+#pragma mark - 窗口
 
 @interface ADPanelPlainWindow : UIWindow
 @end
@@ -48,7 +64,7 @@ static BOOL ADWindowCanBecomeKeyIMP(id self, SEL _cmd) {
     return YES;
 }
 
-// 运行时在目标基类之上注册我们自己的 ADPanelWindow 子类。
+// 在目标基类之上注册我们自己的子类，逐个缓存，避免重复注册同名类。
 static Class ADPanelWindowClassForBase(Class base) {
     static NSMutableDictionary<NSString *, id> *cache;
     static dispatch_once_t onceToken;
@@ -77,19 +93,10 @@ static Class ADPanelWindowClassForBase(Class base) {
     return cls;
 }
 
-// 私有签名在 SDK 里没有声明，用 NSInvocation 统一调用，任何异常都不外泄。
-static id ADInvokeInit(Class cls, SEL sel, NSArray *arguments, NSString **errorOut) {
+// 私有初始化器在 SDK 里没有声明，统一走 NSInvocation，异常不外泄。
+static id ADInvokeInit(Class cls, SEL sel, NSArray *arguments) {
     NSMethodSignature *signature = [cls instanceMethodSignatureForSelector:sel];
-    if (!signature) {
-        if (errorOut) {
-            *errorOut = @"no such initializer";
-        }
-        return nil;
-    }
-    if (signature.numberOfArguments != arguments.count + 2) {
-        if (errorOut) {
-            *errorOut = [NSString stringWithFormat:@"arity %lu", (unsigned long)signature.numberOfArguments];
-        }
+    if (!signature || signature.numberOfArguments != arguments.count + 2) {
         return nil;
     }
     id target = [cls alloc];
@@ -102,10 +109,7 @@ static id ADInvokeInit(Class cls, SEL sel, NSArray *arguments, NSString **errorO
     }
     @try {
         [invocation invoke];
-    } @catch (NSException *exception) {
-        if (errorOut) {
-            *errorOut = exception.reason ?: exception.name;
-        }
+    } @catch (__unused NSException *exception) {
         return nil;
     }
     __unsafe_unretained id result = nil;
@@ -130,96 +134,95 @@ static id ADLayoutStrategyForClass(Class cls) {
         __unsafe_unretained id result = nil;
         [invocation getReturnValue:&result];
         return result;
-    } @catch (NSException *exception) {
+    } @catch (__unused NSException *exception) {
         return nil;
     }
 }
 
 static UIWindow *ADCreatePanelWindow(UIWindowScene *scene, UIViewController *controller) {
-    NSMutableString *log = ADWindowDiagLog();
-    [log setString:@""];
+    SEL layoutSel = NSSelectorFromString(@"initWithWindowScene:rootViewController:layoutStrategy:role:debugName:");
+    SEL roleSel = NSSelectorFromString(@"initWithWindowScene:rootViewController:role:debugName:");
+    SEL plainSel = NSSelectorFromString(@"initWithWindowScene:rootViewController:");
 
-    NSString *layoutSelName = @"initWithWindowScene:rootViewController:layoutStrategy:role:debugName:";
-    NSString *roleSelName = @"initWithWindowScene:rootViewController:role:debugName:";
-    NSString *plainSelName = @"initWithWindowScene:rootViewController:";
-
-    // SBFWindow 在 SpringBoardFoundation 里，是 SBWindow 的父类，一并兜底。
     NSArray<NSString *> *baseNames = @[ @"SBTransientOverlayWindow", @"SBWindow", @"SBFWindow" ];
     NSArray<NSString *> *roleValues = @[ ADPanelTraitsRole, @"" ];
 
     for (NSString *baseName in baseNames) {
         Class base = NSClassFromString(baseName);
-        [log appendFormat:@"%@=%@;", baseName, base ? @"yes" : @"no"];
         if (!base || ![base isSubclassOfClass:[UIWindow class]]) {
             continue;
         }
         Class cls = ADPanelWindowClassForBase(base);
-        [log appendFormat:@"pair(%@)=%@;", baseName, cls ? NSStringFromClass(cls) : @"nil"];
         if (!cls) {
             continue;
         }
 
         for (NSString *role in roleValues) {
-            NSString *label = [NSString stringWithFormat:@"%@/role=%@", baseName, role.length ? role : @"nil"];
-
-            NSString *error = nil;
-            id window = ADInvokeInit(cls,
-                                     NSSelectorFromString(layoutSelName),
-                                     @[
-                                        scene, controller, ADLayoutStrategyForClass(cls) ?: [NSNull null],
-                                        role, ADPanelDebugName
-                                     ],
-                                     &error);
+            id layoutStrategy = ADLayoutStrategyForClass(cls);
+            NSArray *layoutArguments = @[
+                scene, controller, layoutStrategy ?: [NSNull null], role, ADPanelDebugName
+            ];
+            id window = ADInvokeInit(cls, layoutSel, layoutArguments);
             if ([window isKindOfClass:[UIWindow class]]) {
-                [log appendFormat:@"%@ layout->OK;", label];
                 return (UIWindow *)window;
             }
-            [log appendFormat:@"%@ layout->%@;", label, error ?: @"nil"];
 
-            error = nil;
-            window = ADInvokeInit(cls,
-                                  NSSelectorFromString(roleSelName),
-                                  @[ scene, controller, role, ADPanelDebugName ],
-                                  &error);
-            if ([window isKindOfClass:[UIWindow class]]) {
-                [log appendFormat:@"%@ role->OK;", label];
-                return (UIWindow *)window;
+            id roleWindow = ADInvokeInit(cls, roleSel, @[ scene, controller, role, ADPanelDebugName ]);
+            if ([roleWindow isKindOfClass:[UIWindow class]]) {
+                return (UIWindow *)roleWindow;
             }
-            [log appendFormat:@"%@ role->%@;", label, error ?: @"nil"];
         }
 
-        NSString *error = nil;
-        id window = ADInvokeInit(cls, NSSelectorFromString(plainSelName), @[ scene, controller ], &error);
-        if ([window isKindOfClass:[UIWindow class]]) {
-            [log appendFormat:@"%@ plain->OK;", baseName];
-            return (UIWindow *)window;
+        id plainWindow = ADInvokeInit(cls, plainSel, @[ scene, controller ]);
+        if ([plainWindow isKindOfClass:[UIWindow class]]) {
+            return (UIWindow *)plainWindow;
         }
-        [log appendFormat:@"%@ plain->%@;", baseName, error ?: @"nil"];
     }
 
-    [log appendString:@"fallback=plainUIWindow;"];
     return [[ADPanelPlainWindow alloc] initWithWindowScene:scene];
 }
 
-#pragma mark - 工具
+#pragma mark - 场景选择
 
-static UIWindowScene *ADActiveWindowScene(void) {
-    UIApplication *application = [UIApplication sharedApplication];
-    UIWindowScene *fallback = nil;
-    for (UIScene *scene in application.connectedScenes) {
+static BOOL ADSceneHasKeyboardWindow(UIWindowScene *scene) {
+    for (UIWindow *window in scene.windows) {
+        NSString *name = NSStringFromClass([window class]);
+        if ([name rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// 优先：真正挂着键盘窗口的场景（键盘只会在它自己所属的场景里被宿主化）。
+// 其次：窗口最多的场景（SpringBoard 主场景）。
+// 最后：任意 foreground active 的窗口场景。
+static UIWindowScene *ADPanelHostWindowScene(void) {
+    UIWindowScene *busiest = nil;
+    UIWindowScene *foreground = nil;
+    NSUInteger busiestCount = 0;
+
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) {
             continue;
         }
         UIWindowScene *windowScene = (UIWindowScene *)scene;
-        if (!fallback) {
-            fallback = windowScene;
-        }
-        if (windowScene.activationState == UISceneActivationStateForegroundActive) {
+        if (ADSceneHasKeyboardWindow(windowScene)) {
             return windowScene;
         }
+        if (!foreground && windowScene.activationState == UISceneActivationStateForegroundActive) {
+            foreground = windowScene;
+        }
+        NSUInteger count = windowScene.windows.count;
+        if (count > busiestCount) {
+            busiestCount = count;
+            busiest = windowScene;
+        }
     }
-    return fallback;
+    return busiest ?: foreground;
 }
+
+#pragma mark - 工具
 
 static NSString *ADURLQueryValue(NSURL *URL, NSString *name) {
     NSURLComponents *components = [NSURLComponents componentsWithURL:URL
@@ -251,10 +254,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     ADPanelViewController *_panel;
     UIWindow *_window;
     BOOL _visible;
-    // 收起动画的「代次」：每次 show/hide 都自增，过期的延时清理直接作废。
     NSUInteger _teardownToken;
-    // 键盘是否已经真的弹出来过。弹出来之后就不再抢 key / 重聚焦，
-    // 否则用户按第三方输入法的「收起键盘」会被我们的重试立刻顶回去（要点两次）。
     BOOL _keyboardShown;
 }
 
@@ -303,7 +303,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
         return;
     }
     _keyboardShown = YES;
-    [self _logStage:@"keyboard-will-show"];
 }
 
 - (BOOL)isPanelVisible {
@@ -329,12 +328,11 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
         return;
     }
 
-    UIWindowScene *scene = ADActiveWindowScene();
+    UIWindowScene *scene = ADPanelHostWindowScene();
     if (!scene) {
         return;
     }
 
-    // 先清掉任何残留状态，避免上一次异常留下半吊子面板。
     [self _teardownPanelSynchronously];
 
     _panel = [[ADPanelViewController alloc] init];
@@ -346,16 +344,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       [weakSelf openApplication:bundleIdentifier];
     };
 
-    NSMutableString *windowLog = ADWindowDiagLog();
-    [windowLog setString:@""];
     _window = ADCreatePanelWindow(scene, _panel);
-    ADAppendDiagLine([NSString stringWithFormat:@"[%@] stage=window class=%@ attempts=%@",
-                                                [NSDate date], NSStringFromClass([_window class]),
-                                                windowLog]);
-    // 取当前方向的场景坐标：横竖屏在唤醒时判定一次，之后不做实时跟随。
     _window.frame = scene.coordinateSpace.bounds;
-    // 1.0.7（键盘验收可用版本）就是这个层级；1.1.8 试过 998，日志显示键盘窗口
-    // 反而彻底不出现，层级不是原因，回到基准值。
     _window.windowLevel = 10000001.0;
     _window.backgroundColor = [UIColor clearColor];
     _window.opaque = NO;
@@ -373,17 +363,16 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     [_panel animateIn];
 
     [self _refreshApplications];
-    [self _scheduleKeyboardRetries];
-    [self _logStage:@"show"];
+    [self _scheduleKeyboardFocus];
+    ADDiagLine([NSString stringWithFormat:@"[%@] show win=%@ frame=%@ sceneHasKeyboard=%d",
+                                          [NSDate date],
+                                          NSStringFromClass([_window class]),
+                                          NSStringFromCGRect(_window.frame),
+                                          (int)ADSceneHasKeyboardWindow(scene)]);
 }
 
-// SpringBoard 会在场景激活时把自己的窗口重新设回 key window，
-// 我们的搜索框即便拿到 first responder，窗口一旦丢 key，键盘就会被 UIKit 抑制。
-// 所以在头两秒里反复把 key 抢回来并重新聚焦。
-// 一旦 UIKeyboardWillShowNotification 到了（键盘真的弹出来了），就停止重试，
-// 把控制权还给用户，避免和第三方输入法自带的「收起键盘」打架。
-// —— 这一段与 1.0.7（键盘验收可用版本）逐行一致，不要加 resign 之类的额外动作。
-- (void)_scheduleKeyboardRetries {
+// 唤出后头两秒里反复把 key 抢回来并重聚焦；键盘通知一到就停手。
+- (void)_scheduleKeyboardFocus {
     NSArray<NSNumber *> *delays = @[@0.20, @0.45, @0.80, @1.30, @2.00];
     __weak typeof(self) weakSelf = self;
 
@@ -401,7 +390,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                          }
                          [strongSelf->_window makeKeyWindow];
                          [strongSelf->_panel focusSearchField];
-                         [strongSelf _logStage:[NSString stringWithFormat:@"retry-%@s", number]];
                        });
     }
 }
@@ -410,9 +398,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     if (bundleIdentifier.length == 0) {
         return;
     }
-    // 先把覆盖层无条件摘掉，再隔一个 runloop 发跳转；
-    // ScreenCore 建浮窗场景不能和「面板收起」挤在同一帧。
-    // 这条路径不做收起动画：动画期间残留的窗口会干扰 SC 建浮窗。
+    // 先摘覆盖层，再隔一个 runloop 交给 ScreenCore 建浮窗。
     [self _teardownPanelSynchronously];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -440,9 +426,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
         return;
     }
 
-    // Kayoko 式收起：0.33s 淡出，没有位移。
-    // 但清理绝不依赖动画 completion —— 用代次 + 延时兜底同步摘除，
-    // 即使主线程被打断，覆盖层也一定在 0.34s 内消失。
     [_panel animateOutWithCompletion:nil];
 
     NSUInteger token = ++_teardownToken;
@@ -458,8 +441,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                    });
 }
 
-// 同步、幂等地把面板从事件链和窗口上摘掉。
-// 关键：清理动作不挂在动画 completion 上，主线程被卡住时也能保证覆盖层移除。
 - (void)_teardownPanelSynchronously {
     _teardownToken++;
     _keyboardShown = NO;
@@ -478,7 +459,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 }
 
 - (void)_handleForegroundLoss:(NSNotification *)notification {
-    // 锁屏、切后台、场景断开时无条件、同步摘掉面板，不允许它浮在所有界面之上。
     if (_visible) {
         [self _teardownPanelSynchronously];
     }
@@ -498,122 +478,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     }];
 }
 
-#pragma mark - 诊断
-
-// 追加式日志，真机排查时用 Filza 打开
-// /var/mobile/Library/Preferences/com.voring.appdrawer/diag.txt 即可。
-// 覆盖写会丢掉时序（上一次就出现「键盘通知是在面板摘掉之后才到的」），所以按阶段追加。
-// 场景里所有窗口的层级 / hidden / key 一览：用来判断键盘窗口到底在不在、
-// 是不是被我们的面板窗口压在下面。
-static NSString *ADWindowSummary(UIWindowScene *scene, UIWindow *panelWindow) {
-    NSMutableArray<NSString *> *names = [NSMutableArray array];
-    for (UIWindow *window in scene.windows) {
-        NSString *className = NSStringFromClass([window class]);
-        if ([className rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location ==
-            NSNotFound) {
-            if (window != panelWindow) {
-                continue;
-            }
-        }
-        [names addObject:[NSString stringWithFormat:@"%@(level=%.0f,key=%d,hidden=%d)",
-                                                    className,
-                                                    window.windowLevel,
-                                                    (int)window.isKeyWindow,
-                                                    (int)window.isHidden]];
-    }
-    return names.count ? [names componentsJoinedByString:@"|"] : @"none";
-}
-
-- (UISearchBar *)_panelSearchBar {
-    if (!_panel) {
-        return nil;
-    }
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:_panel.view];
-    while (queue.count > 0) {
-        UIView *view = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-        if ([view isKindOfClass:[UISearchBar class]]) {
-            return (UISearchBar *)view;
-        }
-        for (UIView *child in view.subviews) {
-            [queue addObject:child];
-        }
-    }
-    return nil;
-}
-
-// 往 diag.txt 追加一行原始文本（超过 64KB 清空重写）。
-static void ADAppendDiagLine(NSString *line) {
-    NSString *directory = ADRequestDirectoryPath();
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:NULL];
-    NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
-    NSDictionary *attributes =
-        [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    if ([attributes fileSize] > 64 * 1024) {
-        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-    }
-    NSString *existing = [NSString stringWithContentsOfFile:path
-                                                   encoding:NSUTF8StringEncoding
-                                                      error:NULL] ?: @"";
-    NSString *updated = [existing stringByAppendingFormat:@"%@\n", line];
-    [updated writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-}
-
-- (void)_logStage:(NSString *)stage {
-    @autoreleasepool {
-        UIWindowScene *scene = _window.windowScene;
-        NSString *activation = @"unknown";
-        switch (scene.activationState) {
-            case UISceneActivationStateForegroundActive:
-                activation = @"foregroundActive";
-                break;
-            case UISceneActivationStateForegroundInactive:
-                activation = @"foregroundInactive";
-                break;
-            case UISceneActivationStateBackground:
-                activation = @"background";
-                break;
-            case UISceneActivationStateUnattached:
-                activation = @"unattached";
-                break;
-            default:
-                break;
-        }
-
-        NSString *searchFieldInfo = @"none";
-        UISearchBar *searchBar = [self _panelSearchBar];
-        if (searchBar) {
-            UITextField *field = searchBar.searchTextField;
-            searchFieldInfo = [NSString stringWithFormat:
-                @"frame=%@,inPanelWindow=%d,alpha=%.2f,hidden=%d,enabled=%d",
-                NSStringFromCGRect(field.frame),
-                (int)(field.window == _window),
-                field.alpha, (int)field.isHidden, (int)field.enabled];
-        }
-
-        NSString *line = [NSString stringWithFormat:
-            @"[%@] stage=%@ visible=%d panelWindow=%@ isKey=%d hidden=%d level=%.0f "
-            @"frame=%@ scene=%@ responder=%d keyboardWindows=%@ searchField=%@",
-            [NSDate date],
-            stage,
-            (int)_visible,
-            NSStringFromClass([_window class]),
-            (int)_window.isKeyWindow,
-            (int)_window.isHidden,
-            _window.windowLevel,
-            NSStringFromCGRect(_window.frame),
-            activation,
-            (int)[_panel isSearchFieldFirstResponder],
-            ADWindowSummary(scene, _window),
-            searchFieldInfo];
-
-        ADAppendDiagLine(line);
-    }
-}
-
 #pragma mark - URL 指令
 
 - (void)handleURL:(NSURL *)URL {
@@ -629,7 +493,6 @@ static void ADAppendDiagLine(NSString *line) {
         return;
     }
 
-    // 强制清理指令：无论面板处于什么状态，立刻摘掉。
     if ([host isEqualToString:@"reset"]) {
         [self _teardownPanelSynchronously];
         return;
