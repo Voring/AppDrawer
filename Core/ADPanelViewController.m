@@ -6,6 +6,49 @@
 #import "ADAppInfo.h"
 #import "ADPrefs.h"
 
+#import "../Shared/URLScheme/ADURLScheme.h"
+
+// 只写几何日志：内容没变就不落盘，避免在布局过程中反复 IO。
+static void ADPanelDiagGeometry(NSString *line) {
+    static NSString *lastLine = nil;
+    if (line.length == 0 || [line isEqualToString:lastLine ?: @""]) {
+        return;
+    }
+    lastLine = [line copy];
+    NSString *directory = ADRequestDirectoryPath();
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:NULL];
+    NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
+    NSDictionary *attributes =
+        [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    if ([attributes fileSize] > 64 * 1024) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+    }
+    NSString *existing = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL] ?: @"";
+    [[existing stringByAppendingFormat:@"%@\n", line]
+        writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
+// 手动方向开关（调试用，不影响正常逻辑）：
+// /var/mobile/Library/Preferences/com.voring.appdrawer/landscape_override
+//   内容 "1" 强制走横屏布局，"0" 强制走竖屏布局，不存在则按自动判定。
+static NSInteger ADLandscapeOverrideValue(void) {
+    NSString *path = [ADRequestDirectoryPath() stringByAppendingPathComponent:@"landscape_override"];
+    NSString *content = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+    content = [content stringByTrimmingCharactersInSet:
+                            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (content.length == 0) {
+        return -1;
+    }
+    return content.integerValue;
+}
+
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 
 // —— 以下视觉/动效参数与 Voring/Kayoko-1 的 Core/Presentation + Core/Views 对齐 ——
@@ -100,6 +143,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *allApplications;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *filteredApplications;
 @property (nonatomic, copy) NSString *lastAppliedQuery;
+@property (nonatomic, assign) BOOL lastFocusResult;
 
 @end
 
@@ -296,6 +340,11 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 #pragma mark - 布局
 
 - (BOOL)isLandscapeInterface {
+    NSInteger overrideValue = ADLandscapeOverrideValue();
+    if (overrideValue >= 0) {
+        return overrideValue == 1;
+    }
+
     UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
     if (@available(iOS 13.0, *)) {
         UIWindowScene *scene = self.view.window.windowScene;
@@ -304,7 +353,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         }
     }
     if (orientation == UIInterfaceOrientationUnknown) {
-        // 16.5 SDK 上 statusBarOrientation 已 deprecated，这里改用窗口尺寸判断。
         CGSize screenSize = self.view.window.frame.size;
         if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
             screenSize = [UIScreen mainScreen].bounds.size;
@@ -419,6 +467,27 @@ static CGFloat const kADFastDismissVelocity = 900.0;
                                                MAX(searchY - listTop, 0.0));
     }
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
+
+    NSString *sceneOrientation = @"none";
+    if (@available(iOS 13.0, *)) {
+        UIWindowScene *scene = self.view.window.windowScene;
+        if (scene) {
+            sceneOrientation = [NSString stringWithFormat:@"%ld", (long)scene.interfaceOrientation];
+        }
+    }
+    ADPanelDiagGeometry([NSString stringWithFormat:
+        @"[%@] stage=geo winFrame=%@ viewBounds=%@ sceneOri=%@ override=%ld landscape=%d "
+        @"safeTop=%.0f card=%@ list=%@ search=%@",
+        [NSDate date],
+        NSStringFromCGSize(self.view.window.frame.size),
+        NSStringFromCGSize(self.view.bounds.size),
+        sceneOrientation,
+        (long)ADLandscapeOverrideValue(),
+        (int)landscape,
+        topInset,
+        NSStringFromCGRect(self.cardView.frame),
+        NSStringFromCGRect(self.collectionView.frame),
+        NSStringFromCGRect(self.searchBar.frame)]);
 }
 
 #pragma mark - 输入框
@@ -429,8 +498,12 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
     [self.view layoutIfNeeded];
     [self.view.window makeKeyWindow];
-    [self.searchBar.searchTextField becomeFirstResponder];
+    _lastFocusResult = [self.searchBar.searchTextField becomeFirstResponder];
     [self.searchBar setShowsCancelButton:YES animated:NO];
+}
+
+- (BOOL)ad_lastFocusResult {
+    return _lastFocusResult;
 }
 
 - (BOOL)isSearchFieldFirstResponder {

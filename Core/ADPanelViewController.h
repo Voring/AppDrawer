@@ -13,6 +13,8 @@
 // 把键盘叫到搜索框上（同时也能看出 window 是否真的拿到了 key）。
 - (void)focusSearchField;
 - (BOOL)isSearchFieldFirstResponder;
+// 最近一次 becomeFirstResponder 的返回值（NO 说明 UIKit 根本没接受这次聚焦）。
+- (BOOL)ad_lastFocusResult;
 
 - (void)animateIn;
 - (void)animateOutWithCompletion:(void (^)(void))completion;
