@@ -5,34 +5,8 @@
 #import "ADAppCell.h"
 #import "ADAppInfo.h"
 #import "ADPrefs.h"
-#import "../Shared/URLScheme/ADURLScheme.h"
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
-
-// 每次几何变化往 diag.txt 追加一行，用来确定横屏下窗口 frame / 根视图 bounds 的真实关系。
-static void ADPanelDiagGeometry(NSString *line) {
-    static NSString *lastLine = nil;
-    if (line.length == 0 || [line isEqualToString:lastLine ?: @""]) {
-        return;
-    }
-    lastLine = [line copy];
-    NSString *directory = ADRequestDirectoryPath();
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:NULL];
-    NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
-    NSDictionary *attributes =
-        [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    if ([attributes fileSize] > 64 * 1024) {
-        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-    }
-    NSString *existing = [NSString stringWithContentsOfFile:path
-                                                   encoding:NSUTF8StringEncoding
-                                                      error:NULL] ?: @"";
-    [[existing stringByAppendingFormat:@"%@\n", line]
-        writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-}
 
 // —— 以下视觉/动效参数与 Voring/Kayoko-1 的 Core/Presentation + Core/Views 对齐 ——
 // 面板：悬浮卡片，四角连续圆角（半径取自屏幕 displayCornerRadius - 3），阴影 0.28。
@@ -319,78 +293,25 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     return MAX(kADPanelCornerRadiusMin, MIN(kADPanelCornerRadiusMax, radius));
 }
 
-#pragma mark - 方向
-
-// 解析最前面那个 App 的窗口场景方向（只作为兜底，不参与主判据）。
-static UIInterfaceOrientation ADFrontmostAppOrientation(void) {
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *candidate in [UIApplication sharedApplication].connectedScenes) {
-            if (![candidate isKindOfClass:[UIWindowScene class]]) {
-                continue;
-            }
-            UIWindowScene *scene = (UIWindowScene *)candidate;
-            if (scene.activationState != UISceneActivationStateForegroundActive) {
-                continue;
-            }
-            NSString *delegateName = NSStringFromClass([scene.delegate class]);
-            if ([delegateName containsString:@"SpringBoard"]) {
-                continue;
-            }
-            UIInterfaceOrientation orientation = scene.interfaceOrientation;
-            if (orientation != UIInterfaceOrientationUnknown) {
-                return orientation;
-            }
-        }
-    }
-    return UIInterfaceOrientationUnknown;
-}
-
-static UIInterfaceOrientation ADDeviceOrientation(void) {
-    switch ([UIDevice currentDevice].orientation) {
-        case UIDeviceOrientationLandscapeLeft:
-            return UIInterfaceOrientationLandscapeRight;
-        case UIDeviceOrientationLandscapeRight:
-            return UIInterfaceOrientationLandscapeLeft;
-        case UIDeviceOrientationPortrait:
-            return UIInterfaceOrientationPortrait;
-        case UIDeviceOrientationPortraitUpsideDown:
-            return UIInterfaceOrientationPortraitUpsideDown;
-        default:
-            return UIInterfaceOrientationUnknown;
-    }
-}
-
 #pragma mark - 布局
 
 - (BOOL)isLandscapeInterface {
-    // 唯一可靠判据：本窗口/根视图自己的尺寸。
-    // 实测：竖屏 frame={{0,0},{393,852}}、横屏 frame={{0,0},{852,393}}，
-    // 且根视图 bounds 与 window frame 始终同步（横屏时布局宽度就是 852）。
-    // 不能用 panel 自己的 windowScene.interfaceOrientation（SpringBoard 恒报竖屏），
-    // 也不能优先用最前 App 的方向（被覆盖的 App 可能只支持竖屏，会把横屏带偏）。
-    CGSize size = self.view.bounds.size;
-    CGSize frameSize = self.view.window.frame.size;
-    if (size.width <= 0.0 || size.height <= 0.0) {
-        size = frameSize;
-    }
-    if (size.width > 0.0 && size.height > 0.0) {
-        if (fabs(size.width - size.height) > 1.0) {
-            return size.width > size.height;
+    UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
+    if (@available(iOS 13.0, *)) {
+        UIWindowScene *scene = self.view.window.windowScene;
+        if (scene) {
+            orientation = scene.interfaceOrientation;
         }
     }
-    UIInterfaceOrientation appOrientation = ADFrontmostAppOrientation();
-    if (appOrientation != UIInterfaceOrientationUnknown) {
-        return UIInterfaceOrientationIsLandscape(appOrientation);
+    if (orientation == UIInterfaceOrientationUnknown) {
+        // 16.5 SDK 上 statusBarOrientation 已 deprecated，这里改用窗口尺寸判断。
+        CGSize screenSize = self.view.window.frame.size;
+        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
+            screenSize = [UIScreen mainScreen].bounds.size;
+        }
+        return screenSize.width > screenSize.height;
     }
-    UIInterfaceOrientation deviceOrientation = ADDeviceOrientation();
-    if (deviceOrientation != UIInterfaceOrientationUnknown) {
-        return UIInterfaceOrientationIsLandscape(deviceOrientation);
-    }
-    return NO;
-}
-
-- (BOOL)ad_isLandscapeLayout {
-    return [self isLandscapeInterface];
+    return UIInterfaceOrientationIsLandscape(orientation);
 }
 
 // 收起手势的方向系数：竖屏向上推（负），横屏向下拉（正）。
@@ -409,20 +330,8 @@ static UIInterfaceOrientation ADDeviceOrientation(void) {
 }
 
 - (void)layoutPanel {
-    // 尺寸同样取窗口 frame，和方向判据保持同一坐标系。
-    CGSize windowSize = self.view.window.frame.size;
-    if (windowSize.width > 0.0 && windowSize.height > 0.0) {
-        // 横屏时若根视图被 traits 旋转过，bounds 会和窗口 frame 对不上（宽高互换），
-        // 这里把根视图直接钉回窗口尺寸，布局永远在同一个坐标系里算。
-        CGSize boundsSize = self.view.bounds.size;
-        if (fabs(boundsSize.width - windowSize.width) > 1.0 ||
-            fabs(boundsSize.height - windowSize.height) > 1.0) {
-            self.view.transform = CGAffineTransformIdentity;
-            self.view.frame = CGRectMake(0.0, 0.0, windowSize.width, windowSize.height);
-        }
-    }
-    CGFloat width = windowSize.width > 0.0 ? windowSize.width : CGRectGetWidth(self.view.bounds);
-    CGFloat height = windowSize.height > 0.0 ? windowSize.height : CGRectGetHeight(self.view.bounds);
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    CGFloat height = CGRectGetHeight(self.view.bounds);
     if (width <= 0.0 || height <= 0.0) {
         return;
     }
@@ -510,17 +419,6 @@ static UIInterfaceOrientation ADDeviceOrientation(void) {
                                                MAX(searchY - listTop, 0.0));
     }
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
-
-    ADPanelDiagGeometry([NSString stringWithFormat:
-        @"[%@] stage=geo windowFrame=%@ viewBounds=%@ landscape=%d safeTop=%.0f appOri=%ld devOri=%ld card=%@",
-        [NSDate date],
-        NSStringFromCGSize(windowSize),
-        NSStringFromCGSize(self.view.bounds.size),
-        (int)landscape,
-        topInset,
-        (long)ADFrontmostAppOrientation(),
-        (long)[UIDevice currentDevice].orientation,
-        NSStringFromCGRect(self.cardView.frame)]);
 }
 
 #pragma mark - 输入框
@@ -543,9 +441,13 @@ static UIInterfaceOrientation ADDeviceOrientation(void) {
 
 - (void)setApplications:(NSArray<ADAppInfo *> *)applications {
     NSArray<ADAppInfo *> *incoming = applications ?: @[];
+
+    // 内容没变就什么都不做：这是打开面板时列表「闪一下」的主要原因
+    // （后台重载回来的同一份列表触发了 reloadData 并重置了滚动位置）。
     if ([self _applications:incoming equalTo:self.allApplications]) {
         return;
     }
+
     self.allApplications = incoming;
     [self applyFilterResettingOffset:NO];
 }
@@ -616,6 +518,7 @@ static UIInterfaceOrientation ADDeviceOrientation(void) {
         self.emptyLabel.hidden = YES;
     }
 
+    // 只有搜索词真的变了才回到起点，后台刷新不能把用户正在看的位置弹走。
     if (resetsOffset || queryChanged) {
         if (self.filteredApplications.count > 0) {
             [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.contentInset.top)
@@ -834,6 +737,7 @@ static UIInterfaceOrientation ADDeviceOrientation(void) {
                   cellForItemAtIndexPath:(NSIndexPath *)indexPath {
     ADAppCell *cell = (ADAppCell *)[collectionView dequeueReusableCellWithReuseIdentifier:ADAppCellReuseIdentifier
                                                                              forIndexPath:indexPath];
+    // collectionView 整体做了纵向翻转，cell 内容再翻回来，文字与图标才是正的。
     cell.contentView.transform = CGAffineTransformMakeScale(1.0, -1.0);
     if (indexPath.item < (NSInteger)self.filteredApplications.count) {
         [cell configureWithApplication:self.filteredApplications[indexPath.item]];
