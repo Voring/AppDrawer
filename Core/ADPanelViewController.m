@@ -6,13 +6,14 @@
 #import "ADAppInfo.h"
 #import "ADPrefs.h"
 
-// 重写版（1.3.0）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
+// 重写版（1.3.x）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
 // 没有任何 isLandscape 判定、没有任何 view.frame / transform 的强制改写。
+// 面板贴上沿（占上半屏），搜索条不会被键盘盖住。
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 
 static CGFloat const kADPanelSideInset = 8.0;
-static CGFloat const kADPanelBottomGap = 8.0;
+static CGFloat const kADPanelEdgeGap = 8.0;
 static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
 static CGFloat const kADPanelMinHeight = 200.0;
 static CGFloat const kADPanelShadowOpacity = 0.28;
@@ -51,6 +52,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     [[[UIColor labelColor] colorWithAlphaComponent:0.22] setStroke];
     UIBezierPath *path = [UIBezierPath bezierPath];
     path.lineWidth = kADGrabberLineWidth;
+    // 圆头，不要方头小长方形。
+    path.lineCapStyle = kCGLineCapRound;
     [path moveToPoint:CGPointMake(2.0, CGRectGetMidY(self.bounds))];
     [path addLineToPoint:CGPointMake(CGRectGetWidth(self.bounds) - 2.0, CGRectGetMidY(self.bounds))];
     [path stroke];
@@ -239,15 +242,15 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     UIEdgeInsets safeArea = self.view.safeAreaInsets;
-    CGFloat bottomInset = MAX(safeArea.bottom, 0.0);
 
     CGFloat cardWidth = width - kADPanelSideInset * 2.0;
     CGFloat cardHeight = floor((height - safeArea.top) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
     cardHeight = MAX(cardHeight, kADPanelMinHeight);
-    cardHeight = MIN(cardHeight, height - safeArea.top - kADPanelBottomGap - bottomInset);
+    cardHeight = MIN(cardHeight, height - safeArea.top - kADPanelEdgeGap);
     CGFloat originX = kADPanelSideInset;
-    // 竖屏贴底；横屏也是同一句，只是画布变宽，于是整体呈现为「竖屏布局的拉伸」。
-    CGFloat originY = height - bottomInset - cardHeight - kADPanelBottomGap;
+    // 贴上沿：面板占上半屏，搜索条不被键盘盖住；横屏是同一句，只是画布变宽，
+    // 于是整体呈现为「竖屏布局的拉伸」。
+    CGFloat originY = safeArea.top + kADPanelEdgeGap;
 
     self.dimView.frame = self.view.bounds;
 
@@ -386,8 +389,9 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 - (void)animateIn {
     [self.view layoutIfNeeded];
 
+    // 面板挂在上沿，所以从上方落下来。
     _cardView.transform = CGAffineTransformMakeTranslation(0.0,
-                                                           CGRectGetHeight(self.cardView.bounds) / 3.0);
+                                                           -CGRectGetHeight(self.cardView.bounds) / 3.0);
     _cardView.alpha = 0.0;
     _dimView.alpha = 0.0;
 
