@@ -5,8 +5,6 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
-#import "ADPrefs.h"
-
 #pragma mark - NSInvocation 参数填充（按真实类型，避免把 BOOL 当 void 或把结构体当指针）
 
 static void ADSetObjectArgument(NSInvocation *invocation, NSUInteger index, id object) {
@@ -167,42 +165,9 @@ static BOOL ADTryRouteApplicationRequest(id target, NSString *bundleIdentifier) 
 
     ADSetObjectArgument(invocation, 2, bundleIdentifier);
     ADSetObjectArgument(invocation, 3, @{});
-    ADSetIntegerArgument(invocation, 4, signature, 0);  // origin: 0 = unknown
-    ADSetIntegerArgument(invocation, 5, signature, 1);  // forward: YES
+    ADSetIntegerArgument(invocation, 4, signature, 0);
+    ADSetIntegerArgument(invocation, 5, signature, 1);
     return ADInvokeAndReadResult(invocation, signature);
-}
-
-static BOOL ADScreenCoreHasExistingScene(NSString *bundleIdentifier) {
-    static NSArray<NSString *> *selectors;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-      selectors = @[ @"sc_hasExistingSceneForBundleIdentifier:",
-                     @"hasExistingSceneForBundleIdentifier:" ];
-    });
-
-    for (NSString *className in ADSCCandidateClassNames()) {
-        Class cls = NSClassFromString(className);
-        if (!cls) {
-            continue;
-        }
-        id instance = ADSharedInstanceForClass(cls);
-        if (!instance) {
-            continue;
-        }
-        for (NSString *selectorName in selectors) {
-            SEL selector = NSSelectorFromString(selectorName);
-            if (![instance respondsToSelector:selector]) {
-                continue;
-            }
-            NSMethodSignature *signature = [instance methodSignatureForSelector:selector];
-            NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-            invocation.target = instance;
-            invocation.selector = selector;
-            ADSetObjectArgument(invocation, 2, bundleIdentifier);
-            return ADInvokeAndReadResult(invocation, signature);
-        }
-    }
-    return NO;
 }
 
 static BOOL ADTryScreenCoreFloating(NSString *bundleIdentifier) {
@@ -295,7 +260,7 @@ static BOOL ADTrySpringBoardServices(NSString *bundleIdentifier) {
           launchFunction = (LaunchFunction)dlsym(handle, "SBSLaunchApplicationWithIdentifier");
       }
       if (!launchFunction) {
-          launchFunction = (LaunchFunction)dlsym(RTLD_DEFAULT, "SBSLaunchApplicationWithIdentifier");
+          launchFunction = (LaunchFunction)dlsym(RLTD_DEFAULT, "SBSLaunchApplicationWithIdentifier");
       }
     });
 
@@ -313,19 +278,7 @@ BOOL ADOpenApplication(NSString *bundleIdentifier) {
     }
 
     if (ADTryScreenCoreFloating(bundleIdentifier)) {
-        // ScreenCore 的方法多数返回 void：无法当场判断是否真的开了浮窗。
-        // 等一下再看一眼有没有浮窗场景，没有就退到系统打开，避免“点了没反应”。
-        if (!ADPrefForceScreenCoreFloating()) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                             if (ADScreenCoreHasExistingScene(bundleIdentifier)) {
-                                 return;
-                             }
-                             if (!ADTryLaunchServices(bundleIdentifier)) {
-                                 ADTrySpringBoardServices(bundleIdentifier);
-                             }
-                           });
-        }
+        // 只发一次请求：ScreenCore 建浮窗场景本身很重。
         return YES;
     }
 
