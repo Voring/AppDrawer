@@ -16,9 +16,11 @@ static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
 static CGFloat const kADPanelTopOffset = 40.0;
 static CGFloat const kADPanelMaxWidth = 430.0;
+// 整体缩小 1/3：宽、高都按 2/3 算。
+static CGFloat const kADPanelShrinkScale = 2.0 / 3.0;
 static CGFloat const kADPanelKeyboardMinHeight = 120.0;
 static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
-static CGFloat const kADPanelMinHeight = 200.0;
+static CGFloat const kADPanelMinHeight = 160.0;
 static CGFloat const kADPanelShadowOpacity = 0.28;
 static CGFloat const kADPanelShadowRadius = 8.0;
 static CGFloat const kADPanelCornerRadiusMin = 28.0;
@@ -259,12 +261,13 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     UIEdgeInsets safeArea = self.view.safeAreaInsets;
     CGFloat topLimit = safeArea.top + kADPanelEdgeGap;
 
-    // 宽度封顶：竖屏本来就窄，仍然是满宽；横屏不会拉成一条横幅，而是居中 430 宽。
-    CGFloat cardWidth = MIN(width - kADPanelSideInset * 2.0, kADPanelMaxWidth);
+    // 宽度 = 可用宽 × 2/3，并再封顶 430：竖屏缩成居中的小卡片，横屏也不会拉成横幅。
+    CGFloat cardWidth = MIN((width - kADPanelSideInset * 2.0) * kADPanelShrinkScale,
+                            kADPanelMaxWidth);
     CGFloat originX = floor((width - cardWidth) / 2.0);
 
-    CGFloat preferredHeight =
-        floor((height - safeArea.top) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
+    CGFloat preferredHeight = floor((height - safeArea.top) * ADPrefPanelHeightPercent() *
+                                    kADPanelHeightScale * kADPanelShrinkScale);
     preferredHeight = MAX(preferredHeight, kADPanelMinHeight);
 
     // 只有一条几何约束：卡片底边不许越过键盘顶边。竖屏键盘矮 → 卡片停在偏好位置；
@@ -424,8 +427,24 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     [self applyFilterResettingOffset:NO];
 }
 
+// 中文输入法在拼音未上屏时，text 属性里通常还看不到这些字母；用 textInRange 取
+// 整个文档内容（包含 marked text），才能做到「一边打一边出结果」。
+- (NSString *)currentSearchText {
+    UITextField *field = self.searchBar.searchTextField;
+    if (!field) {
+        return self.searchBar.text ?: @"";
+    }
+    UITextRange *range = [field textRangeFromPosition:field.beginningOfDocument
+                                           toPosition:field.endOfDocument];
+    NSString *fullText = range ? [field textInRange:range] : nil;
+    if (fullText.length == 0) {
+        fullText = field.text ?: @"";
+    }
+    return fullText ?: @"";
+}
+
 - (void)applyFilterResettingOffset:(BOOL)resetsOffset {
-    NSString *raw = self.searchBar.text ?: @"";
+    NSString *raw = [self currentSearchText];
     NSString *query = [[raw stringByTrimmingCharactersInSet:
                                   [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
     BOOL queryChanged = !(self.lastAppliedQuery == nil ? (query.length == 0)
