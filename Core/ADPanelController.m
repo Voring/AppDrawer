@@ -7,19 +7,6 @@
 #import "ADLauncher.h"
 #import "ADPanelViewController.h"
 
-#pragma mark - 面板窗口
-
-@interface ADPanelWindow : UIWindow
-@end
-
-@implementation ADPanelWindow
-
-- (BOOL)canBecomeKeyWindow {
-    return YES;
-}
-
-@end
-
 #pragma mark - 工具
 
 static UIWindowScene *ADActiveWindowScene(void) {
@@ -38,6 +25,28 @@ static UIWindowScene *ADActiveWindowScene(void) {
         }
     }
     return fallback;
+}
+
+// SpringBoard 的键盘（SBMedusaHostedKeyboardWindow）只跟「当前 key window 所在的场景」
+// 走。自己新建一个 UIWindow 即使 canBecomeKeyWindow 返回 YES、isKeyWindow 为真，
+// medusa 也不会把我们的输入框当成前台键盘焦点 —— 所以必须挂到 SpringBoard 自己的
+// key window 上，键盘才有落点。
+static UIWindow *ADHostWindow(UIWindowScene *scene) {
+    UIWindow *keyWindow = nil;
+    UIWindow *topWindow = nil;
+    for (UIWindow *window in scene.windows) {
+        if (window.isHidden || window.alpha <= 0.0) {
+            continue;
+        }
+        if (window.isKeyWindow) {
+            keyWindow = window;
+            break;
+        }
+        if (!topWindow || window.windowLevel > topWindow.windowLevel) {
+            topWindow = window;
+        }
+    }
+    return keyWindow ?: topWindow;
 }
 
 static NSString *ADURLQueryValue(NSURL *URL, NSString *name) {
@@ -68,11 +77,14 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
 @implementation ADPanelController {
     ADPanelViewController *_panel;
-    ADPanelWindow *_window;
+    // 承载面板的容器：加在 SpringBoard key window 上，随窗口尺寸走。
+    UIView *_containerView;
+    UIWindow *_hostWindow;
+    UIViewController *_hostViewController;
     BOOL _visible;
     // 收起动画的「代次」：每次 show/hide 都自增，过期的延时清理直接作废。
     NSUInteger _teardownToken;
-    // 键盘是否已经真的弹出来过。弹出来之后就不再抢 key / 重聚焦，
+    // 键盘是否已经真的弹出来过。弹出来之后就不再重聚焦，
     // 否则用户按第三方输入法的「收起键盘」会被我们的重试立刻顶回去（要点两次）。
     BOOL _keyboardShown;
 }
@@ -118,8 +130,11 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 }
 
 - (void)_handleKeyboardWillShow:(NSNotification *)notification {
+    if (!_visible || !_panel) {
+        return;
+    }
     _keyboardShown = YES;
-    [self _writeDiagnostics:@"keyboard-will-show"];
+    [self _logStage:@"keyboard-will-show"];
 }
 
 - (BOOL)isPanelVisible {
@@ -146,12 +161,23 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     }
 
     UIWindowScene *scene = ADActiveWindowScene();
-    if (!scene) {
+    UIWindow *hostWindow = scene ? ADHostWindow(scene) : nil;
+    if (!hostWindow) {
         return;
     }
 
     // 先清掉任何残留状态，避免上一次异常留下半吊子面板。
     [self _teardownPanelSynchronously];
+
+    _hostWindow = hostWindow;
+    _hostViewController = hostWindow.rootViewController;
+
+    _containerView = [[UIView alloc] initWithFrame:hostWindow.bounds];
+    _containerView.backgroundColor = [UIColor clearColor];
+    _containerView.opaque = NO;
+    _containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                      UIViewAutoresizingFlexibleHeight;
+    [hostWindow addSubview:_containerView];
 
     _panel = [[ADPanelViewController alloc] init];
     __weak typeof(self) weakSelf = self;
@@ -162,16 +188,17 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       [weakSelf openApplication:bundleIdentifier];
     };
 
-    _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
-    // 取当前方向的场景坐标：横竖屏在唤醒时判定一次，之后不做实时跟随。
-    _window.frame = scene.coordinateSpace.bounds;
-    // 1.0.3 起就用这个层级，1.0.7 键盘可用时也是它。
-    _window.windowLevel = 10000001.0;
-    _window.backgroundColor = [UIColor clearColor];
-    _window.opaque = NO;
-    _window.rootViewController = _panel;
-    _window.hidden = NO;
-    [_window makeKeyAndVisible];
+    // 面板作为子控制器挂在同一个宿主上：键盘焦点、场景、屏幕圆角全部跟系统一致。
+    if (_hostViewController) {
+        [_hostViewController addChildViewController:_panel];
+    }
+    _panel.view.frame = _containerView.bounds;
+    _panel.view.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                   UIViewAutoresizingFlexibleHeight;
+    [_containerView addSubview:_panel.view];
+    if (_hostViewController) {
+        [_panel didMoveToParentViewController:_hostViewController];
+    }
 
     _visible = YES;
     _keyboardShown = NO;
@@ -184,12 +211,12 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
     [self _refreshApplications];
     [self _scheduleKeyboardRetries];
-    [self _writeDiagnostics:@"show"];
+    [self _logStage:@"show"];
 }
 
-// SpringBoard 会在场景激活时把自己的窗口重新设回 key window，
-// 我们的搜索框即便拿到 first responder，窗口一旦丢 key，键盘就会被 UIKit 抑制。
-// 所以在头两秒里反复把 key 抢回来并重新聚焦。
+// 键盘没上来时，在头两秒里补几次聚焦。
+// 这里不再抢 key window —— 宿主窗口本来就是 SpringBoard 的 key window，
+// 抢来抢去只会和系统/第三方输入法打架（表现为「收起键盘要点两次」）。
 - (void)_scheduleKeyboardRetries {
     NSArray<NSNumber *> *delays = @[@0.20, @0.45, @0.80, @1.30, @2.00];
     __weak typeof(self) weakSelf = self;
@@ -199,23 +226,20 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                                      (int64_t)(number.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
                          ADPanelController *strongSelf = weakSelf;
-                         if (!strongSelf || !strongSelf->_visible || !strongSelf->_panel ||
-                             !strongSelf->_window) {
+                         if (!strongSelf || !strongSelf->_visible || !strongSelf->_panel) {
                              return;
                          }
-                         // 键盘已经出来过就不再来回抢 key：这会和用户主动收起键盘打架。
+                         // 键盘已经出来过就不再来回重聚焦：会和用户主动收起键盘打架。
                          if (strongSelf->_keyboardShown) {
                              return;
                          }
-                         [strongSelf->_window makeKeyAndVisible];
                          // 已经是第一响应者时再调 becomeFirstResponder 是空操作，
                          // 键盘不会被重新呈现，所以先 resign 再聚焦。
                          if ([strongSelf->_panel isSearchFieldFirstResponder]) {
                              [strongSelf->_panel.view endEditing:YES];
                          }
                          [strongSelf->_panel focusSearchField];
-                         [strongSelf _writeDiagnostics:[NSString stringWithFormat:
-                                                                  @"retry-%@s", number]];
+                         [strongSelf _logStage:[NSString stringWithFormat:@"retry-%@s", number]];
                        });
     }
 }
@@ -226,7 +250,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     }
     // 先把覆盖层无条件摘掉，再隔一个 runloop 发跳转；
     // ScreenCore 建浮窗场景不能和「面板收起」挤在同一帧。
-    // 这条路径不做收起动画：动画期间残留的窗口会干扰 SC 建浮窗。
+    // 这条路径不做收起动画：动画期间残留的视图会干扰 SC 建浮窗。
     [self _teardownPanelSynchronously];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -272,22 +296,28 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                    });
 }
 
-// 同步、幂等地把面板从事件链和窗口上摘掉。
+// 同步、幂等地把面板从视图层级和控制器树上摘掉。
 // 关键：清理动作不挂在动画 completion 上，主线程被卡住时也能保证覆盖层移除。
 - (void)_teardownPanelSynchronously {
     _teardownToken++;
     _keyboardShown = NO;
     if (_panel) {
         [_panel.view endEditing:YES];
+        [_panel willMoveToParentViewController:nil];
+        // resign 第一响应者之后再拆视图，避免键盘残留在别的窗口上。
+        if (_panel.view.isFirstResponder) {
+            [_panel.view resignFirstResponder];
+        }
         [_panel.view removeFromSuperview];
+        [_panel removeFromParentViewController];
         _panel = nil;
     }
-    if (_window) {
-        _window.hidden = YES;
-        [_window resignKeyWindow];
-        _window.rootViewController = nil;
-        _window = nil;
+    if (_containerView) {
+        [_containerView removeFromSuperview];
+        _containerView = nil;
     }
+    _hostViewController = nil;
+    _hostWindow = nil;
     _visible = NO;
 }
 
@@ -314,8 +344,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
 #pragma mark - 诊断
 
-// 记录面板/键盘状态，真机排查时用 Filza 打开
+// 追加式日志，真机排查时用 Filza 打开
 // /var/mobile/Library/Preferences/com.voring.appdrawer/diag.txt 即可。
+// 只覆盖写会丢掉关键时序（比如键盘是在面板摘掉之后才弹的），所以改成按阶段追加。
 static NSString *ADKeyboardWindowSummary(void) {
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -326,110 +357,15 @@ static NSString *ADKeyboardWindowSummary(void) {
             NSString *className = NSStringFromClass([window class]);
             if ([className rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location !=
                 NSNotFound) {
-                [names addObject:[NSString stringWithFormat:@"%@(key=%d,hidden=%d)",
+                [names addObject:[NSString stringWithFormat:@"%@(level=%.0f,key=%d,hidden=%d)",
                                                             className,
+                                                            window.windowLevel,
                                                             (int)window.isKeyWindow,
                                                             (int)window.isHidden]];
             }
         }
     }
     return names.count ? [names componentsJoinedByString:@"|"] : @"none";
-}
-
-static NSUInteger ADKeyboardWindowCount(void) {
-    NSUInteger count = 0;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) {
-            continue;
-        }
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            NSString *className = NSStringFromClass([window class]);
-            if ([className rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location !=
-                NSNotFound) {
-                count++;
-            }
-        }
-    }
-    return count;
-}
-
-- (void)_writeDiagnostics:(NSString *)stage {
-    @autoreleasepool {
-        UIWindowScene *scene = _window.windowScene;
-        NSString *activation = @"unknown";
-        switch (scene.activationState) {
-            case UISceneActivationStateForegroundActive:
-                activation = @"foregroundActive";
-                break;
-            case UISceneActivationStateForegroundInactive:
-                activation = @"foregroundInactive";
-                break;
-            case UISceneActivationStateBackground:
-                activation = @"background";
-                break;
-            case UISceneActivationStateUnattached:
-                activation = @"unattached";
-                break;
-            default:
-                break;
-        }
-
-        CGRect viewBounds = _panel.view.bounds;
-        NSMutableArray<NSString *> *rootSubviews = [NSMutableArray array];
-        for (UIView *subview in _panel.view.subviews) {
-            [rootSubviews addObject:NSStringFromCGRect(subview.frame)];
-        }
-
-        UIWindow *keyWindow = nil;
-        for (UIWindow *window in _window.windowScene.windows) {
-            if (window.isKeyWindow) {
-                keyWindow = window;
-                break;
-            }
-        }
-        NSString *searchFieldInfo = @"none";
-        UISearchBar *searchBar = [self _panelSearchBar];
-        if (searchBar) {
-            UITextField *field = searchBar.searchTextField;
-            BOOL sameWindow = (field.window == _window);
-            searchFieldInfo = [NSString stringWithFormat:
-                @"frame=%@,fieldWindowIsPanel=%d,alpha=%.2f,hidden=%d,enabled=%d",
-                NSStringFromCGRect(field.frame), (int)sameWindow,
-                field.alpha, (int)field.isHidden, (int)field.enabled];
-        }
-
-        NSString *report = [NSString stringWithFormat:
-            @"stage=%@\ntime=%@\nvisible=%d\npanelWindowClass=%@\npanelWindowIsKey=%d\n"
-            @"panelWindowHidden=%d\nwindowLevel=%.0f\nviewBounds=%.0fx%.0f\n"
-            @"sceneState=%@\nfirstResponder=%d\nkeyboardWindowCount=%lu\nkeyboardWindows=%@\n"
-            @"rootSubviews=%@\nkeyWindowClass=%@\nsearchField=%@\n",
-            stage,
-            [NSDate date],
-            (int)_visible,
-            NSStringFromClass([_window class]),
-            (int)_window.isKeyWindow,
-            (int)_window.isHidden,
-            _window.windowLevel,
-            viewBounds.size.width,
-            viewBounds.size.height,
-            activation,
-            (int)[_panel isSearchFieldFirstResponder],
-            (unsigned long)ADKeyboardWindowCount(),
-            ADKeyboardWindowSummary(),
-            [rootSubviews componentsJoinedByString:@"|"] ?: @"none",
-            keyWindow ? NSStringFromClass([keyWindow class]) : @"none",
-            searchFieldInfo];
-
-        NSString *directory = ADRequestDirectoryPath();
-        [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:NULL];
-        [report writeToFile:[directory stringByAppendingPathComponent:@"diag.txt"]
-                  atomically:YES
-                    encoding:NSUTF8StringEncoding
-                       error:NULL];
-    }
 }
 
 - (UISearchBar *)_panelSearchBar {
@@ -448,6 +384,76 @@ static NSUInteger ADKeyboardWindowCount(void) {
         }
     }
     return nil;
+}
+
+- (void)_logStage:(NSString *)stage {
+    @autoreleasepool {
+        UIWindowScene *scene = _hostWindow.windowScene;
+        NSString *activation = @"unknown";
+        switch (scene.activationState) {
+            case UISceneActivationStateForegroundActive:
+                activation = @"foregroundActive";
+                break;
+            case UISceneActivationStateForegroundInactive:
+                activation = @"foregroundInactive";
+                break;
+            case UISceneActivationStateBackground:
+                activation = @"background";
+                break;
+            case UISceneActivationStateUnattached:
+                activation = @"unattached";
+                break;
+            default:
+                break;
+        }
+
+        NSString *searchFieldInfo = @"none";
+        UISearchBar *searchBar = [self _panelSearchBar];
+        if (searchBar) {
+            UITextField *field = searchBar.searchTextField;
+            searchFieldInfo = [NSString stringWithFormat:
+                @"frame=%@,inHostWindow=%d,alpha=%.2f,hidden=%d,enabled=%d",
+                NSStringFromCGRect(field.frame),
+                (int)(field.window != nil),
+                field.alpha, (int)field.isHidden, (int)field.enabled];
+        }
+
+        NSString *line = [NSString stringWithFormat:
+            @"[%@] stage=%@ visible=%d hostWindow=%@ hostIsKey=%d hostLevel=%.0f "
+            @"container=%@ panel=%d bounds=%.0fx%.0f scene=%@ responder=%d "
+            @"keyboardWindows=%@ searchField=%@",
+            [NSDate date],
+            stage,
+            (int)_visible,
+            NSStringFromClass([_hostWindow class]),
+            (int)_hostWindow.isKeyWindow,
+            _hostWindow.windowLevel,
+            NSStringFromCGRect(_containerView.frame),
+            (int)(_panel != nil),
+            CGRectGetWidth(_containerView.bounds),
+            CGRectGetHeight(_containerView.bounds),
+            activation,
+            (int)[_panel isSearchFieldFirstResponder],
+            ADKeyboardWindowSummary(),
+            searchFieldInfo];
+
+        NSString *directory = ADRequestDirectoryPath();
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
+        NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path
+                                                                                   error:NULL];
+        if ([attributes fileSize] > 64 * 1024) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+        }
+        NSString *existing = [NSString stringWithContentsOfFile:path
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:NULL] ?: @"";
+        NSString *updated = [existing stringByAppendingFormat:@"%@\n", line];
+        [updated writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    }
 }
 
 #pragma mark - URL 指令
