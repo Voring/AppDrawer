@@ -560,30 +560,18 @@ static void ADQueryDiag(NSString *line) {
     if (query.length == 0) {
         self.filteredApplications = self.allApplications ?: @[];
     } else {
-        // 查询按空格/分隔符拆成片段，逐段「包含」即可，不要求整段连贯。
-        NSCharacterSet *separator = [NSCharacterSet
-            characterSetWithCharactersInString:@" \t\n\r'’-·_"];
-        NSArray<NSString *> *parts = [raw componentsSeparatedByCharactersInSet:separator];
-        NSMutableArray<NSString *> *tokens = [NSMutableArray array];
-        for (NSString *part in parts) {
-            NSString *token = ADNormalizeText(part);
-            if (token.length > 0) {
-                [tokens addObject:token];
-            }
-        }
-
+        // 查询唯一的预处理是把空白全部删掉（未上屏拼音常被系统拆成 "wei xin"），
+        // 得到一个连贯串；随后要求它必须完整出现在「某一个字段」内部。
+        // 字段彼此独立、不拼接，所以不会出现跨字段拼出的假子串。
         NSMutableArray<ADAppInfo *> *matches = [NSMutableArray array];
         for (ADAppInfo *application in self.allApplications) {
-            NSString *keyNorm = ADNormalizeText(application.searchKey);
-            BOOL matched = YES;
-            for (NSString *token in tokens) {
-                if ([keyNorm rangeOfString:token].location == NSNotFound) {
-                    matched = NO;
+            NSArray<NSString *> *fields =
+                [application.searchKey componentsSeparatedByString:@"\n"];
+            for (NSString *field in fields) {
+                if ([ADNormalizeText(field) rangeOfString:query].location != NSNotFound) {
+                    [matches addObject:application];
                     break;
                 }
-            }
-            if (matched) {
-                [matches addObject:application];
             }
         }
         self.filteredApplications = matches;
