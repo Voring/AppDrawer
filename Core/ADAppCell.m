@@ -61,8 +61,14 @@
     self.nameLabel.text = application.displayName;
     self.currentBundleIdentifier = application.bundleIdentifier;
 
-    UIImage *placeholder = [UIImage systemImageNamed:@"app.fill"];
-    self.iconView.image = placeholder;
+    // 命中缓存就直接上真图，不画占位图 —— 否则列表打开瞬间会「闪一下」。
+    UIImage *cachedIcon = [application cachedIconImage];
+    if (cachedIcon) {
+        self.iconView.image = cachedIcon;
+        return;
+    }
+
+    self.iconView.image = [UIImage systemImageNamed:@"app.fill"];
 
     NSString *bundleIdentifier = application.bundleIdentifier;
     __weak typeof(self) weakSelf = self;

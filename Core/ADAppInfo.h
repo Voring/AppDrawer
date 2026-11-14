@@ -14,5 +14,9 @@
 
 // 同步取图标，调用方自己放到后台队列；内部有 NSCache。
 - (UIImage *)iconImage;
+// 只读缓存，不触发加载。cell 首次配置时用它，避免「占位图 → 真图标」的闪烁。
+- (UIImage *)cachedIconImage;
+// 后台批量预热图标缓存，面板唤出时图标已经在内存里。
++ (void)preloadIconsForApplications:(NSArray<ADAppInfo *> *)applications;
 
 @end
