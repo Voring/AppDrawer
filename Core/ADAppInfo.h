@@ -4,7 +4,7 @@
 
 @property (nonatomic, copy, readonly) NSString *bundleIdentifier;
 @property (nonatomic, copy, readonly) NSString *displayName;
-// 预拼好的检索串：原名 + bundle id + 全拼 + 首字母 + 去空格全拼
+// 预拼好的检索串：原名 / 全拼 / 首字母 / 去空格全拼，四段以换行分隔（不含 bundle id）
 @property (nonatomic, copy, readonly) NSString *searchKey;
 @property (nonatomic, strong, readonly) id applicationProxy;
 

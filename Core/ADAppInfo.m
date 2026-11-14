@@ -17,7 +17,7 @@ static NSCache<NSString *, UIImage *> *ADIconCache(void) {
     return cache;
 }
 
-static NSString *ADSearchKey(NSString *name, NSString *bundleIdentifier) {
+static NSString *ADSearchKey(NSString *name) {
     NSMutableString *latin = [name mutableCopy];
     if (latin.length) {
         CFStringTransform((__bridge CFMutableStringRef)latin, NULL,
@@ -37,8 +37,11 @@ static NSString *ADSearchKey(NSString *name, NSString *bundleIdentifier) {
 
     NSString *compactPinyin = [pinyin stringByReplacingOccurrencesOfString:@" " withString:@""];
 
-    return [[NSString stringWithFormat:@"%@ %@ %@ %@ %@",
-                                       name, pinyin, initials, compactPinyin, bundleIdentifier]
+    // 只拼「名称 / 全拼 / 首字母 / 去空格全拼」四段，不再拼 bundle id。
+    // 段之间用换行分隔：匹配时各段单独规范化、单独判断包含，
+    // 避免删空格后首尾字母跨段粘连，拼出原文并不存在的子串（如 qsq + qingsongqian → qq）。
+    return [[NSString stringWithFormat:@"%@\n%@\n%@\n%@",
+                                       name, pinyin, initials, compactPinyin]
         lowercaseString];
 }
 
@@ -52,7 +55,7 @@ static NSString *ADSearchKey(NSString *name, NSString *bundleIdentifier) {
         _applicationProxy = proxy;
         _bundleIdentifier = [bundleIdentifier copy];
         _displayName = [displayName copy];
-        _searchKey = ADSearchKey(displayName ?: bundleIdentifier, bundleIdentifier);
+        _searchKey = ADSearchKey(displayName ?: bundleIdentifier);
     }
     return self;
 }
@@ -61,11 +64,10 @@ static NSString *ADSearchKey(NSString *name, NSString *bundleIdentifier) {
 
 // 同样一张图，用像素尺寸而不是 UI 尺寸比较，避免 @2x/@3x 干扰。
 static NSUInteger ADImagePixelArea(UIImage *image) {
-    CGImageRef cgImage = image.CGImage;
-    if (!cgImage) {
+    if (!image.CGImage) {
         return 0;
     }
-    return CGImageGetWidth(cgImage) * CGImageGetHeight(cgImage);
+    return CGImageGetWidth(image.CGImage) * CGImageGetHeight(image.CGImage);
 }
 
 - (UIImage *)_largestIconFromProxy {
