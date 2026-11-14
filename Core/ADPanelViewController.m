@@ -21,16 +21,18 @@ static CGFloat const kADGrabberWidth = 42.0;
 static CGFloat const kADGrabberHeight = 14.0;
 static CGFloat const kADGrabberLineWidth = 5.0;
 static CGFloat const kADGrabberTop = 6.0;
-// 竖屏面板高度在偏好值（默认 55%）基础上再缩到 1/3（约屏幕的 18%）。
-static CGFloat const kADPanelHeightScale = 1.0 / 3.0;
-static CGFloat const kADPanelPortraitMinHeight = 170.0;
-// 横屏：宽度取屏幕 1/2，居中；高度沿用偏好值。
+// 竖屏面板高度在偏好值（默认 55%）基础上再缩到 2/3（约屏幕的 37%）。
+static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
+static CGFloat const kADPanelPortraitMinHeight = 260.0;
+// 横屏：宽度取屏幕 1/2，水平居中；高度在偏好值上再缩 1/4，贴近顶部（约两条抓杆的高度）。
 static CGFloat const kADPanelLandscapeWidthFraction = 0.5;
-static CGFloat const kADPanelLandscapeMinHeight = 220.0;
+static CGFloat const kADPanelLandscapeHeightScale = 0.75;
+static CGFloat const kADPanelLandscapeTopGap = 28.0;
+static CGFloat const kADPanelLandscapeMinHeight = 180.0;
 // 展开/收起：0.33s，弹簧阻尼 1，easeOut；展开位移为自身高度的 1/3。
 static NSTimeInterval const kADPanelAnimationDuration = 0.33;
-// 上推收起：100pt 内渐进淡出，速度超过 900 直接收。
-static CGFloat const kADFadeOutDistance = 100.0;
+// 上推收起：60pt 内渐进淡出，速度超过 900 直接收。
+static CGFloat const kADFadeOutDistance = 60.0;
 static CGFloat const kADFastDismissVelocity = 900.0;
 
 @interface ADGrabberView : UIView
@@ -183,6 +185,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     _collectionView.dataSource = self;
     _collectionView.delegate = self;
     _collectionView.contentInset = UIEdgeInsetsMake(2.0, 0.0, 16.0, 0.0);
+    // 面板在上半屏、交互条贴底：列表按「从下往上」铺，第一项落在最靠近搜索框的底部。
+    _collectionView.transform = CGAffineTransformMakeScale(1.0, -1.0);
     [_collectionView registerClass:[ADAppCell class]
         forCellWithReuseIdentifier:ADAppCellReuseIdentifier];
     [_chromeClipView addSubview:_collectionView];
@@ -315,15 +319,6 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     return [self isLandscapeInterface] ? 1.0 : -1.0;
 }
 
-- (void)viewWillTransitionToSize:(CGSize)size
-       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
-    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
-    __weak typeof(self) weakSelf = self;
-    [coordinator animateAlongsideTransition:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
-      [weakSelf layoutPanel];
-    } completion:nil];
-}
-
 - (void)layoutPanel {
     CGFloat width = CGRectGetWidth(self.view.bounds);
     CGFloat height = CGRectGetHeight(self.view.bounds);
@@ -340,15 +335,15 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     CGFloat originY = 0.0;
 
     if (landscape) {
-        // 横屏：半宽、水平居中，交互条在上方。
+        // 横屏：半宽、水平居中，贴近顶部，交互条在上方。
         cardWidth = floor(width * kADPanelLandscapeWidthFraction);
-        cardHeight = floor(height * ADPrefPanelHeightPercent());
+        cardHeight = floor(height * ADPrefPanelHeightPercent() * kADPanelLandscapeHeightScale);
         cardHeight = MAX(cardHeight, kADPanelLandscapeMinHeight);
-        cardHeight = MIN(cardHeight, height - kADPanelVerticalGap * 2.0);
+        cardHeight = MIN(cardHeight, height - kADPanelLandscapeTopGap - kADPanelVerticalGap);
         originX = floor((width - cardWidth) / 2.0);
-        originY = floor((height - cardHeight) / 2.0);
+        originY = kADPanelLandscapeTopGap;
     } else {
-        // 竖屏：贴顶，高度缩到偏好值的 1/3。
+        // 竖屏：贴顶，高度缩到偏好值的 2/3。
         cardWidth = width - kADPanelHorizontalInset * 2.0;
         cardHeight = floor((height - topInset) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
         cardHeight = MAX(cardHeight, kADPanelPortraitMinHeight);
@@ -422,6 +417,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     if (!self.searchBar.window) {
         return;
     }
+    [self.view layoutIfNeeded];
+    [self.view.window makeKeyWindow];
     [self.searchBar.searchTextField becomeFirstResponder];
     [self.searchBar setShowsCancelButton:YES animated:NO];
 }
@@ -511,7 +508,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         self.emptyLabel.hidden = YES;
     }
 
-    // 只有搜索词真的变了才回到顶部，后台刷新不能把用户正在看的位置弹走。
+    // 只有搜索词真的变了才回到起点，后台刷新不能把用户正在看的位置弹走。
     if (resetsOffset || queryChanged) {
         if (self.filteredApplications.count > 0) {
             [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.contentInset.top)
@@ -682,7 +679,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     if (CGRectContainsPoint(self.collectionView.frame, location)) {
         UIEdgeInsets insets = self.collectionView.adjustedContentInset;
         if ([self isLandscapeInterface]) {
-            // 横屏下拉：列表回到顶部才收。
+            // 横屏下拉：列表回到起点才收。
             return self.collectionView.contentOffset.y <= -insets.top + 0.5;
         }
         CGFloat bottomBoundary =
@@ -730,6 +727,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
                   cellForItemAtIndexPath:(NSIndexPath *)indexPath {
     ADAppCell *cell = (ADAppCell *)[collectionView dequeueReusableCellWithReuseIdentifier:ADAppCellReuseIdentifier
                                                                              forIndexPath:indexPath];
+    // collectionView 整体做了纵向翻转，cell 内容再翻回来，文字与图标才是正的。
+    cell.contentView.transform = CGAffineTransformMakeScale(1.0, -1.0);
     if (indexPath.item < (NSInteger)self.filteredApplications.count) {
         [cell configureWithApplication:self.filteredApplications[indexPath.item]];
     }
