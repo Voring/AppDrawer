@@ -72,6 +72,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     BOOL _visible;
     // 收起动画的「代次」：每次 show/hide 都自增，过期的延时清理直接作废。
     NSUInteger _teardownToken;
+    // 键盘是否已经真的弹出来过。弹出来之后就不再抢 key / 重聚焦，
+    // 否则用户按第三方输入法的「收起键盘」会被我们的重试立刻顶回去（要点两次）。
+    BOOL _keyboardShown;
 }
 
 + (instancetype)sharedController {
@@ -102,12 +105,20 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                    selector:@selector(_handleForegroundLoss:)
                        name:UISceneDidDisconnectNotification
                      object:nil];
+        [center addObserver:self
+                   selector:@selector(_handleKeyboardWillShow:)
+                       name:UIKeyboardWillShowNotification
+                     object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)_handleKeyboardWillShow:(NSNotification *)notification {
+    _keyboardShown = YES;
 }
 
 - (BOOL)isPanelVisible {
@@ -160,6 +171,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     [_window makeKeyAndVisible];
 
     _visible = YES;
+    _keyboardShown = NO;
 
     [_panel setApplications:[ADAppCatalog cachedApplications]];
     [_panel setQuery:query];
@@ -174,6 +186,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 // SpringBoard 会在场景激活时把自己的窗口重新设回 key window，
 // 我们的搜索框即便拿到 first responder，窗口一旦丢 key，键盘就会被 UIKit 抑制。
 // 所以在头两秒里反复把 key 抢回来并重新聚焦。
+// 一旦 UIKeyboardWillShowNotification 到了（键盘真的弹出来了），就停止重试，
+// 把控制权还给用户，避免和第三方输入法自带的「收起键盘」打架。
 - (void)_scheduleKeyboardRetries {
     NSArray<NSNumber *> *delays = @[@0.20, @0.45, @0.80, @1.30, @2.00];
     __weak typeof(self) weakSelf = self;
@@ -185,6 +199,10 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                          ADPanelController *strongSelf = weakSelf;
                          if (!strongSelf || !strongSelf->_visible || !strongSelf->_panel ||
                              !strongSelf->_window) {
+                             return;
+                         }
+                         // 键盘已经出来过就不再来回抢 key：这会和用户主动收起键盘打架。
+                         if (strongSelf->_keyboardShown) {
                              return;
                          }
                          [strongSelf->_window makeKeyWindow];
@@ -247,9 +265,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 }
 
 // 同步、幂等地把面板从事件链和窗口上摘掉。
-// 关键：清理动作不挂在动画 completion 上，主线程被卡住时也能保证覆盖层移除。
 - (void)_teardownPanelSynchronously {
     _teardownToken++;
+    _keyboardShown = NO;
     if (_panel) {
         [_panel.view endEditing:YES];
         [_panel.view removeFromSuperview];
