@@ -8,12 +8,15 @@
 
 // 重写版（1.3.x）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
 // 没有任何 isLandscape 判定、没有任何 view.frame / transform 的强制改写。
-// 面板贴上沿（占上半屏），搜索条不会被键盘盖住。
+// 位置只由两个量决定：一个固定偏好偏移，和键盘顶边。
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 
 static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
+static CGFloat const kADPanelTopOffset = 40.0;
+static CGFloat const kADPanelMaxWidth = 430.0;
+static CGFloat const kADPanelKeyboardMinHeight = 120.0;
 static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
 static CGFloat const kADPanelMinHeight = 200.0;
 static CGFloat const kADPanelShadowOpacity = 0.28;
@@ -80,6 +83,9 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *allApplications;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *filteredApplications;
 @property (nonatomic, copy) NSString *lastAppliedQuery;
+
+// 键盘顶边（self.view 坐标系）；0 表示当前没有键盘。位置由它推出来，不靠横竖屏判定。
+@property (nonatomic, assign) CGFloat keyboardTop;
 
 @end
 
@@ -169,6 +175,11 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     [_cardView addGestureRecognizer:_panGestureRecognizer];
 
     [self applyFilterResettingOffset:YES];
+    [self startObservingKeyboard];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -240,17 +251,33 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     if (width <= 0.0 || height <= 0.0) {
         return;
     }
+    // 拖拽过程中卡片带 transform，此时不改 frame。
+    if (!CGAffineTransformIsIdentity(self.cardView.transform)) {
+        return;
+    }
 
     UIEdgeInsets safeArea = self.view.safeAreaInsets;
+    CGFloat topLimit = safeArea.top + kADPanelEdgeGap;
 
-    CGFloat cardWidth = width - kADPanelSideInset * 2.0;
-    CGFloat cardHeight = floor((height - safeArea.top) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
-    cardHeight = MAX(cardHeight, kADPanelMinHeight);
-    cardHeight = MIN(cardHeight, height - safeArea.top - kADPanelEdgeGap);
-    CGFloat originX = kADPanelSideInset;
-    // 贴上沿：面板占上半屏，搜索条不被键盘盖住；横屏是同一句，只是画布变宽，
-    // 于是整体呈现为「竖屏布局的拉伸」。
-    CGFloat originY = safeArea.top + kADPanelEdgeGap;
+    // 宽度封顶：竖屏本来就窄，仍然是满宽；横屏不会拉成一条横幅，而是居中 430 宽。
+    CGFloat cardWidth = MIN(width - kADPanelSideInset * 2.0, kADPanelMaxWidth);
+    CGFloat originX = floor((width - cardWidth) / 2.0);
+
+    CGFloat preferredHeight =
+        floor((height - safeArea.top) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
+    preferredHeight = MAX(preferredHeight, kADPanelMinHeight);
+
+    // 只有一条几何约束：卡片底边不许越过键盘顶边。竖屏键盘矮 → 卡片停在偏好位置；
+    // 横屏键盘高 → 这一条会同时把卡片往上推、把高度压小。没有任何横竖屏分支。
+    CGFloat maxBottom = height - kADPanelEdgeGap;
+    if (self.keyboardTop > 0.0) {
+        maxBottom = MIN(maxBottom, self.keyboardTop - kADPanelEdgeGap);
+    }
+    CGFloat cardHeight = MIN(preferredHeight, MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight));
+    cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
+
+    CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);
+    originY = MAX(topLimit, originY);
 
     self.dimView.frame = self.view.bounds;
 
@@ -286,6 +313,63 @@ static CGFloat const kADFastDismissVelocity = 900.0;
                                            cardWidthActual,
                                            MAX(searchY - kADListTopInset, 0.0));
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
+}
+
+#pragma mark - 键盘避让（只认键盘顶边，不问方向）
+
+- (void)startObservingKeyboard {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    [center addObserver:self
+               selector:@selector(handleKeyboardWillChangeFrame:)
+                   name:UIKeyboardWillChangeFrameNotification
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(handleKeyboardWillHide:)
+                   name:UIKeyboardWillHideNotification
+                 object:nil];
+}
+
+- (void)handleKeyboardWillChangeFrame:(NSNotification *)notification {
+    NSValue *value = notification.userInfo[UIKeyboardFrameEndUserInfoKey];
+    if (!value) {
+        return;
+    }
+    CGRect keyboardFrame = [self.view convertRect:[value CGRectValue] fromView:nil];
+    CGFloat top = CGRectGetMinY(keyboardFrame);
+    if (top >= CGRectGetHeight(self.view.bounds) - 0.5) {
+        top = 0.0;
+    }
+    [self applyKeyboardTop:top userInfo:notification.userInfo];
+}
+
+- (void)handleKeyboardWillHide:(NSNotification *)notification {
+    [self applyKeyboardTop:0.0 userInfo:notification.userInfo];
+}
+
+- (void)applyKeyboardTop:(CGFloat)top userInfo:(NSDictionary *)userInfo {
+    if (fabs(self.keyboardTop - top) < 0.5) {
+        return;
+    }
+    self.keyboardTop = top;
+
+    NSNumber *duration = userInfo[UIKeyboardAnimationDurationUserInfoKey];
+    NSTimeInterval animationDuration = duration ? duration.doubleValue : 0.25;
+    NSNumber *curve = userInfo[UIKeyboardAnimationCurveUserInfoKey];
+    UIViewAnimationOptions options = UIViewAnimationOptionBeginFromCurrentState;
+    if (curve) {
+        options |= (UIViewAnimationOptions)(curve.unsignedIntegerValue << 16);
+    }
+    if (animationDuration <= 0.01) {
+        [self layoutPanel];
+        return;
+    }
+    [UIView animateWithDuration:animationDuration
+                          delay:0.0
+                        options:options
+                     animations:^{
+                       [self layoutPanel];
+                     }
+                     completion:nil];
 }
 
 #pragma mark - 输入框
