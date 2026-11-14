@@ -1,13 +1,12 @@
 #import "ADLauncher.h"
 
-#import <dlfcn.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
 #import "ADPrefs.h"
 
-#pragma mark - NSInvocation 参数填充（按真实类型，避免把 BOOL 当 void 或把结构体当指针）
+#pragma mark - 参数写入（严格按签名类型，类型不符直接放弃调用）
 
 static void ADSetObjectArgument(NSInvocation *invocation, NSUInteger index, id object) {
     id value = object;
@@ -19,186 +18,143 @@ static void ADSetRectArgument(NSInvocation *invocation, NSUInteger index, CGRect
     [invocation setArgument:&value atIndex:(NSInteger)index];
 }
 
-static void ADSetIntegerArgument(NSInvocation *invocation,
-                                NSUInteger index,
-                                NSMethodSignature *signature,
-                                unsigned long long value) {
+// 校验某个参数位是不是「对象」类型。
+static BOOL ADArgumentIsObject(NSMethodSignature *signature, NSUInteger index) {
+    if (index >= signature.numberOfArguments) {
+        return NO;
+    }
     const char *type = [signature getArgumentTypeAtIndex:index];
-    switch (type[0]) {
-        case 'Q': {
-            unsigned long long v = value;
-            [invocation setArgument:&v atIndex:(NSInteger)index];
-            break;
-        }
-        case 'q': {
-            long long v = (long long)value;
-            [invocation setArgument:&v atIndex:(NSInteger)index];
-            break;
-        }
-        case 'I': {
-            unsigned int v = (unsigned int)value;
-            [invocation setArgument:&v atIndex:(NSInteger)index];
-            break;
-        }
-        case 'i': {
-            int v = (int)value;
-            [invocation setArgument:&v atIndex:(NSInteger)index];
-            break;
-        }
-        case 'B': {
-            BOOL v = value ? YES : NO;
-            [invocation setArgument:&v atIndex:(NSInteger)index];
-            break;
-        }
-        case 'c': {
-            char v = value ? 1 : 0;
-            [invocation setArgument:&v atIndex:(NSInteger)index];
-            break;
-        }
-        default:
-            break;
+    if (!type) {
+        return NO;
     }
+    return type[0] == '@';
 }
 
-// 返回 YES 表示方法确实被调用；返回类型为 BOOL 时取真实返回值。
-static BOOL ADInvokeAndReadResult(NSInvocation *invocation, NSMethodSignature *signature) {
-    [invocation invoke];
-
-    const char *returnType = signature.methodReturnType;
-    if (returnType[0] == 'v') {
-        return YES;
+// 校验某个参数位是不是和 CGRect 尺寸一致的 C 结构体。
+// 私有接口一旦按错误 ABI 传参，很容易把调用线程卡死，所以必须严格比对。
+static BOOL ADArgumentIsRect(NSMethodSignature *signature, NSUInteger index) {
+    if (index >= signature.numberOfArguments) {
+        return NO;
     }
-    if (returnType[0] == 'B' || returnType[0] == 'c') {
-        BOOL result = NO;
-        [invocation getReturnValue:&result];
-        return result;
+    const char *type = [signature getArgumentTypeAtIndex:index];
+    if (!type || type[0] != '{') {
+        return NO;
     }
-    return YES;
+    NSUInteger size = 0;
+    NSGetSizeAndAlignment(type, &size, NULL);
+    return size == sizeof(CGRect);
 }
 
-#pragma mark - ScreenCore 共享实例
+#pragma mark - ScreenCore 私有接口
 
-static id ADSharedInstanceForClass(Class cls) {
-    static NSArray<NSString *> *sharedSelectors;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-      sharedSelectors = @[
-          @"sc_sharedCoordinator",
-          @"sc_sharedManager",
-          @"sc_sharedController",
-          @"sc_sharedDriver",
-          @"sharedInstance",
-          @"sharedManager",
-          @"defaultManager"
-      ];
-    });
+// 与 QuickLaunch 相同的最小调用面：
+//   [NSClassFromString(@"SCFloatingSceneManager") sc_sharedManager]
+//   -sc_openSplitForBundleIdentifier:presentationSourceRect:
+//   -sc_openSplitForBundleIdentifier:
+// 只认这一个类和这一族 selector，不做候选类遍历，也不碰 sc_route... 那条路由。
+static id ADScreenCoreManager(void) {
+    Class managerClass = NSClassFromString(@"SCFloatingSceneManager");
+    if (!managerClass) {
+        return nil;
+    }
 
-    for (NSString *selectorName in sharedSelectors) {
-        SEL selector = NSSelectorFromString(selectorName);
-        if (![cls respondsToSelector:selector]) {
-            continue;
+    SEL selector = NSSelectorFromString(@"sc_sharedManager");
+    if (![managerClass respondsToSelector:selector]) {
+        return nil;
+    }
+
+    id manager = nil;
+    @try {
+        manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, selector);
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+    return manager;
+}
+
+static BOOL ADInvokeOpenSplit(id manager, NSString *bundleIdentifier, CGRect rect) {
+    BOOL withRect = !CGRectIsEmpty(rect);
+    NSString *selectorName = withRect ? @"sc_openSplitForBundleIdentifier:presentationSourceRect:"
+                                     : @"sc_openSplitForBundleIdentifier:";
+    SEL selector = NSSelectorFromString(selectorName);
+
+    if (![manager respondsToSelector:selector]) {
+        return NO;
+    }
+
+    NSMethodSignature *signature = [manager methodSignatureForSelector:selector];
+    if (!signature) {
+        return NO;
+    }
+    if (!ADArgumentIsObject(signature, 2)) {
+        return NO;
+    }
+    if (withRect && !ADArgumentIsRect(signature, 3)) {
+        return NO;
+    }
+
+    BOOL accepted = NO;
+    @try {
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = manager;
+        invocation.selector = selector;
+        ADSetObjectArgument(invocation, 2, bundleIdentifier);
+        if (withRect) {
+            ADSetRectArgument(invocation, 3, rect);
         }
-        id instance = ((id (*)(id, SEL))objc_msgSend)(cls, selector);
-        if (instance) {
-            return instance;
+        [invocation invoke];
+
+        const char *returnType = signature.methodReturnType;
+        if (returnType[0] == 'v') {
+            accepted = YES;
+        } else if (returnType[0] == 'B' || returnType[0] == 'c') {
+            BOOL result = NO;
+            [invocation getReturnValue:&result];
+            accepted = result;
+        } else {
+            accepted = YES;
         }
+    } @catch (__unused NSException *exception) {
+        return NO;
     }
-    return nil;
+    return accepted;
 }
 
-static NSArray<NSString *> *ADSCCandidateClassNames(void) {
-    static NSArray<NSString *> *classNames;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-      classNames = @[
-          @"SCExternalLinkCoordinator",
-          @"SCFloatingSceneManager",
-          @"SCFloatingDockManager",
-          @"SBIconController"
-      ];
-    });
-    return classNames;
-}
-
+// 浮窗展开动画的起点矩形，取屏幕中下部一小块。
 static CGRect ADSourceRect(void) {
     CGRect screenBounds = [UIScreen mainScreen].bounds;
     CGFloat width = CGRectGetWidth(screenBounds);
     CGFloat height = CGRectGetHeight(screenBounds);
-    CGFloat side = 96.0;
-    return CGRectMake(floor((width - side) / 2.0), floor(height * 0.28), side, side);
+    CGFloat side = 88.0;
+    return CGRectMake(floor((width - side) / 2.0),
+                      floor(height * 0.30),
+                      side,
+                      side);
 }
 
-#pragma mark - ScreenCore 调用
-
-static BOOL ADTryOpenSplit(id target, NSString *bundleIdentifier, CGRect rect, BOOL withRect) {
-    NSString *selectorName = withRect ? @"sc_openSplitForBundleIdentifier:presentationSourceRect:"
-                                     : @"sc_openSplitForBundleIdentifier:";
-    SEL selector = NSSelectorFromString(selectorName);
-    if (![target respondsToSelector:selector]) {
-        return NO;
-    }
-
-    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-    invocation.target = target;
-    invocation.selector = selector;
-
-    ADSetObjectArgument(invocation, 2, bundleIdentifier);
-    if (withRect) {
-        ADSetRectArgument(invocation, 3, rect);
-    }
-    return ADInvokeAndReadResult(invocation, signature);
-}
-
-static BOOL ADTryRouteApplicationRequest(id target, NSString *bundleIdentifier) {
-    SEL selector = NSSelectorFromString(@"sc_routeApplicationRequestForBundleIdentifier:options:origin:forward:");
-    if (![target respondsToSelector:selector]) {
-        return NO;
-    }
-
-    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-    if (signature.numberOfArguments < 6) {
-        return NO;
-    }
-
-    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-    invocation.target = target;
-    invocation.selector = selector;
-
-    ADSetObjectArgument(invocation, 2, bundleIdentifier);
-    ADSetObjectArgument(invocation, 3, @{});
-    ADSetIntegerArgument(invocation, 4, signature, 0);
-    ADSetIntegerArgument(invocation, 5, signature, 1);
-    return ADInvokeAndReadResult(invocation, signature);
-}
-
+// ScreenCore 建场景只能在主线程做，且必须给足一个 runloop 间隔，
+// 不能和面板收起动画挤在同一帧。
 static BOOL ADTryScreenCoreFloating(NSString *bundleIdentifier) {
-    CGRect sourceRect = ADSourceRect();
-
-    for (NSString *className in ADSCCandidateClassNames()) {
-        Class cls = NSClassFromString(className);
-        if (!cls) {
-            continue;
-        }
-        id instance = ADSharedInstanceForClass(cls);
-        if (!instance) {
-            continue;
-        }
-
-        if (ADTryOpenSplit(instance, bundleIdentifier, sourceRect, YES)) {
-            return YES;
-        }
-        if (ADTryOpenSplit(instance, bundleIdentifier, CGRectZero, NO)) {
-            return YES;
-        }
-        if (ADTryRouteApplicationRequest(instance, bundleIdentifier)) {
-            return YES;
-        }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          ADTryScreenCoreFloating(bundleIdentifier);
+        });
+        return YES;
     }
-    return NO;
+
+    id manager = ADScreenCoreManager();
+    if (!manager) {
+        return NO;
+    }
+
+    if (ADInvokeOpenSplit(manager, bundleIdentifier, ADSourceRect())) {
+        return YES;
+    }
+    // 带 rect 的版本不被接受时，退回不带 rect 的那条。
+    return ADInvokeOpenSplit(manager, bundleIdentifier, CGRectZero);
 }
 
-#pragma mark - LaunchServices
+#pragma mark - LaunchServices（仅作显式选择的备用路径）
 
 static id ADDefaultWorkspace(void) {
     Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
@@ -212,22 +168,20 @@ static id ADDefaultWorkspace(void) {
     return ((id (*)(id, SEL))objc_msgSend)(workspaceClass, selector);
 }
 
-// 注意：ScreenCore 钩的是 openApplicationWithBundleID:（没有 ...Identifier 后缀）。
 static BOOL ADTryLaunchServices(NSString *bundleIdentifier) {
     id workspace = ADDefaultWorkspace();
     if (!workspace) {
         return NO;
     }
 
-    NSArray<NSString *> *selectors = @[
-        @"openApplicationWithBundleID:",
-        @"openApplicationWithBundleIdentifier:"
-    ];
-    for (NSString *selectorName in selectors) {
-        SEL selector = NSSelectorFromString(selectorName);
-        if (![workspace respondsToSelector:selector]) {
-            continue;
-        }
+    // openApplicationWithBundleID: 会落到 ScreenCore 的 FBSystemService 链路，
+    // 那条链路在 SpringBoard 内要同步等结果，容易把主线程按死。
+    SEL selector = NSSelectorFromString(@"openApplicationWithBundleID:");
+    if (![workspace respondsToSelector:selector]) {
+        return NO;
+    }
+
+    @try {
         Method method = class_getInstanceMethod(object_getClass(workspace), selector);
         const char *encoding = method ? method_getTypeEncoding(method) : NULL;
         if (encoding && (encoding[0] == 'B' || encoding[0] == 'c')) {
@@ -235,41 +189,10 @@ static BOOL ADTryLaunchServices(NSString *bundleIdentifier) {
         } else {
             ((void (*)(id, SEL, id))objc_msgSend)(workspace, selector, bundleIdentifier);
         }
-        return YES;
-    }
-
-    SEL modernSelector = NSSelectorFromString(
-        @"openApplicationWithBundleIdentifier:configuration:completionHandler:");
-    if ([workspace respondsToSelector:modernSelector]) {
-        ((void (*)(id, SEL, id, id, id))objc_msgSend)(workspace, modernSelector, bundleIdentifier, nil, nil);
-        return YES;
-    }
-
-    return NO;
-}
-
-#pragma mark - SpringBoardServices（最后兜底）
-
-static BOOL ADTrySpringBoardServices(NSString *bundleIdentifier) {
-    typedef int (*LaunchFunction)(CFStringRef, BOOL);
-
-    static LaunchFunction launchFunction;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-      void *handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
-                            RTLD_LAZY);
-      if (handle) {
-          launchFunction = (LaunchFunction)dlsym(handle, "SBSLaunchApplicationWithIdentifier");
-      }
-      if (!launchFunction) {
-          launchFunction = (LaunchFunction)dlsym(RTLD_DEFAULT, "SBSLaunchApplicationWithIdentifier");
-      }
-    });
-
-    if (!launchFunction) {
+    } @catch (__unused NSException *exception) {
         return NO;
     }
-    return launchFunction((__bridge CFStringRef)bundleIdentifier, NO) == 0;
+    return YES;
 }
 
 #pragma mark - 入口
@@ -279,21 +202,11 @@ BOOL ADOpenApplication(NSString *bundleIdentifier) {
         return NO;
     }
 
-    // 主路径：系统 LaunchServices 链路。ScreenCore 接管的就是系统跳转，
-    // 聚焦搜索走的也是这条路；不直接碰它的私有接口。
-    if (ADTryLaunchServices(bundleIdentifier)) {
-        return YES;
+    if (ADPrefLauncherMode() == ADLauncherModeScreenCore) {
+        // 与 QuickLaunch 一致：只走 ScreenCore 自己的浮窗接口，失败就什么都不做。
+        // 不回落到 LaunchServices，避免同一个 App 被开两次、以及同步链路按死主线程。
+        return ADTryScreenCoreFloating(bundleIdentifier);
     }
 
-    // 可选增强：私有 ScreenCore 接口，默认关闭。
-    // 只有偏好里把 UseScreenCorePrivateAPI 置 YES 才尝试；整段包在 @try 里，
-    // 私有方法抛异常不能把 SpringBoard 带崩。
-    if (ADPrefUseScreenCorePrivateAPI()) {
-        @try {
-            ADTryScreenCoreFloating(bundleIdentifier);
-        } @catch (__unused NSException *exception) {
-        }
-    }
-
-    return ADTrySpringBoardServices(bundleIdentifier);
+    return ADTryLaunchServices(bundleIdentifier);
 }
