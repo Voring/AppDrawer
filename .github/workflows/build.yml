@@ -1,0 +1,90 @@
+name: Build AppDrawer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: brew install ldid xz make
+
+      - name: Setup Theos (roothide)
+        run: |
+          set -euo pipefail
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
+
+      - name: Install iOS 16.5 SDK
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --sparse --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout set iPhoneOS16.5.sdk
+          rm -rf "$HOME/theos/sdks"
+          mv /tmp/sdks "$HOME/theos/sdks"
+          ls "$HOME/theos/sdks"
+
+      - name: Build roothide package
+        run: |
+          set -o pipefail
+          export THEOS="$HOME/theos"
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e \
+            TARGET=iphone:clang:16.5:16.0 2>&1 | tee /tmp/build.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          pwd
+          echo '--- packages ---'
+          ls -l packages 2>&1 || true
+
+      - name: Publish deb and build log
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          if ls packages/*.deb >/dev/null 2>&1; then
+            cp packages/*.deb out/latest.deb
+          fi
+          {
+            echo "=== BUILD LOG (last 300 lines) ==="
+            tail -n 300 /tmp/build.log 2>/dev/null || echo "no log produced"
+          } | sed 's/[[:cntrl:]]//g' > build-log.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build-log.txt out/latest.deb 2>/dev/null || git add build-log.txt || true
+          git commit -m "ci: build log and deb [skip ci]" || true
+          git pull --rebase || true
+          git push || true
+
+      - name: Upload deb artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppDrawer-roothide
+          path: packages/*.deb
+          if-no-files-found: error
+
+      - name: Release deb
+        if: success()
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: AppDrawer roothide build ${{ github.run_number }}
+          files: packages/*.deb
+          fail_on_unmatched_files: false
