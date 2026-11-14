@@ -5,12 +5,31 @@
 #import "ADAppCell.h"
 #import "ADAppInfo.h"
 #import "ADPrefs.h"
+#import "ADURLScheme.h"
 
 // 重写版（1.3.x）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
 // 没有任何 isLandscape 判定、没有任何 view.frame / transform 的强制改写。
 // 位置只由两个量决定：一个固定偏好偏移，和键盘顶边。
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
+
+// 检索前统一剔除空格、声调残留、不可见字符等：只保留字母、数字、汉字。
+static NSString *ADNormalizeText(NSString *raw) {
+    if (raw.length == 0) {
+        return @"";
+    }
+    NSMutableString *out = [NSMutableString string];
+    for (NSUInteger i = 0; i < raw.length; i++) {
+        unichar c = [raw characterAtIndex:i];
+        BOOL alnum = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                     (c >= 'A' && c <= 'Z');
+        BOOL cjk = c >= 0x4E00 && c <= 0x9FFF;
+        if (alnum || cjk) {
+            [out appendFormat:@"%c", c];
+        }
+    }
+    return out.lowercaseString;
+}
 
 static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
@@ -89,6 +108,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *allApplications;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *filteredApplications;
 @property (nonatomic, copy) NSString *lastAppliedQuery;
+// 委托回调带回的当前文本（marked 阶段比直接读 field.text 更全）。
+@property (nonatomic, copy) NSString *lastDelegateText;
 
 // 键盘顶边（self.view 坐标系）；0 表示当前没有键盘。位置由它推出来，不靠横竖屏判定。
 @property (nonatomic, assign) CGFloat keyboardTop;
@@ -97,6 +118,37 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 @end
 
 @implementation ADPanelViewController
+
+
+// 检索诊断：后台串行写，定长，不阻塞主线程。
+static void ADQueryDiag(NSString *line) {
+    if (line.length == 0) {
+        return;
+    }
+    static dispatch_queue_t queue;
+    static NSMutableArray<NSString *> *lines;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.voring.appdrawer.query.diag", DISPATCH_QUEUE_SERIAL);
+        lines = [NSMutableArray array];
+    });
+    dispatch_async(queue, ^{
+        [lines addObject:line];
+        while (lines.count > 24) {
+            [lines removeObjectAtIndex:0];
+        }
+        NSString *directory = ADRequestDirectoryPath();
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        NSString *path = [directory stringByAppendingPathComponent:@"querydiag.txt"];
+        [[lines componentsJoinedByString:@"\n"] writeToFile:path
+                                               atomically:YES
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+    });
+}
 
 #pragma mark - 生命周期
 
@@ -436,10 +488,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 // 整个文档内容（包含 marked text），才能做到「一边打一边出结果」。
 - (NSString *)currentSearchText {
     UITextField *field = self.searchBar.searchTextField;
-    if (!field) {
-        return self.searchBar.text ?: @"";
-    }
-    NSString *committed = field.text ?: @"";
+    NSString *committed = field.text ?: (self.lastDelegateText ?: self.searchBar.text ?: @"");
     NSString *markedText = nil;
     UITextRange *markedRange = field.markedTextRange;
     if (markedRange && !markedRange.isEmpty) {
@@ -452,23 +501,26 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
     if (markedText.length == 0) {
         // 最后一道兜底：UIKit 把未上屏内容存在这个私有槽里。
-        @try {
-            id value = [field valueForKey:@"_markedText"];
-            if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
-                markedText = value;
+        NSArray<NSString *> *keys = @[@"_markedText", @"markedText", @"_markedTextString"];
+        for (NSString *key in keys) {
+            @try {
+                id value = [field valueForKey:key];
+                if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
+                    markedText = value;
+                    break;
+                }
+            } @catch (__unused NSException *exception) {
             }
-        } @catch (__unused NSException *exception) {
         }
     }
     if (markedText.length == 0) {
         return committed;
     }
-    // 多音节拼音时，field.text 往往已经包含整串（如 "weixin"），而 markedTextRange
-    // 只覆盖后面那一段（"xin"）。这时不能再拼一遍，否则查询会变成 "weixinxin"。
-    if ([committed hasSuffix:markedText]) {
+    // 两段内容任意包含对方都属于同一份输入，只取较长的一段，避免重复拼接。
+    if ([committed containsString:markedText]) {
         return committed;
     }
-    if ([markedText hasPrefix:committed]) {
+    if ([markedText containsString:committed]) {
         return markedText;
     }
     return [committed stringByAppendingString:markedText];
@@ -496,10 +548,8 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         [self stopQueryPolling];
         return;
     }
-    NSString *raw = [self currentSearchText];
-    NSString *normalized = [[raw stringByTrimmingCharactersInSet:
-                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    if ([normalized isEqualToString:self.lastAppliedQuery]) {
+    NSString *query = ADNormalizeText([self currentSearchText]);
+    if ([query isEqualToString:self.lastAppliedQuery]) {
         return;
     }
     [self applyFilterResettingOffset:YES];
@@ -507,21 +557,38 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 - (void)applyFilterResettingOffset:(BOOL)resetsOffset {
     NSString *raw = [self currentSearchText];
-    NSString *query = [[raw stringByTrimmingCharactersInSet:
-                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    NSString *query = ADNormalizeText(raw);
     BOOL queryChanged = !(self.lastAppliedQuery == nil ? (query.length == 0)
                                                        : [self.lastAppliedQuery isEqualToString:query]);
     self.lastAppliedQuery = query;
+    ADQueryDiag([NSString stringWithFormat:@"raw=[%@] norm=[%@]", raw, query]);
 
     if (query.length == 0) {
         self.filteredApplications = self.allApplications ?: @[];
     } else {
-        NSString *compact = [query stringByReplacingOccurrencesOfString:@" " withString:@""];
+        // 查询按空格/分隔符拆成片段，逐段「包含」即可，不要求整段连贯。
+        NSCharacterSet *separator = [NSCharacterSet
+            characterSetWithCharactersInString:@" \t\n\r'’-·_"];
+        NSArray<NSString *> *parts = [raw componentsSeparatedByCharactersInSet:separator];
+        NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+        for (NSString *part in parts) {
+            NSString *token = ADNormalizeText(part);
+            if (token.length > 0) {
+                [tokens addObject:token];
+            }
+        }
+
         NSMutableArray<ADAppInfo *> *matches = [NSMutableArray array];
         for (ADAppInfo *application in self.allApplications) {
-            NSString *key = application.searchKey;
-            if ([key rangeOfString:query].location != NSNotFound ||
-                (compact.length && [key rangeOfString:compact].location != NSNotFound)) {
+            NSString *keyNorm = ADNormalizeText(application.searchKey);
+            BOOL matched = YES;
+            for (NSString *token in tokens) {
+                if ([keyNorm rangeOfString:token].location == NSNotFound) {
+                    matched = NO;
+                    break;
+                }
+            }
+            if (matched) {
                 [matches addObject:application];
             }
         }
@@ -727,6 +794,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 }
 
 - (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    self.lastDelegateText = searchText;
     [self applyFilterResettingOffset:YES];
 }
 
