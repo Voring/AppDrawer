@@ -8,45 +8,62 @@
 
 #import "../Shared/URLScheme/ADURLScheme.h"
 
-// 只写几何日志：内容没变就不落盘，避免在布局过程中反复 IO。
+// 几何日志：只允许在后台队列写。绝对不能出现在布局路径上——
+// 在主线程里同步重写 diag.txt 会挤掉键盘建立输入会话的时间窗（1.2.3/1.2.5 就是这么炸的）。
 static void ADPanelDiagGeometry(NSString *line) {
-    static NSString *lastLine = nil;
-    if (line.length == 0 || [line isEqualToString:lastLine ?: @""]) {
+    if (line.length == 0) {
         return;
     }
-    lastLine = [line copy];
-    NSString *directory = ADRequestDirectoryPath();
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:NULL];
-    NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
-    NSDictionary *attributes =
-        [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    if ([attributes fileSize] > 64 * 1024) {
-        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-    }
-    NSString *existing = [NSString stringWithContentsOfFile:path
-                                                   encoding:NSUTF8StringEncoding
-                                                      error:NULL] ?: @"";
-    [[existing stringByAppendingFormat:@"%@\n", line]
-        writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.voring.appdrawer.diag", DISPATCH_QUEUE_SERIAL);
+    });
+    dispatch_async(queue, ^{
+        static NSString *lastLine = nil;
+        if ([line isEqualToString:lastLine ?: @""]) {
+            return;
+        }
+        lastLine = [line copy];
+        NSString *directory = ADRequestDirectoryPath();
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
+        NSDictionary *attributes =
+            [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+        if ([attributes fileSize] > 64 * 1024) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+        }
+        NSString *existing = [NSString stringWithContentsOfFile:path
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:NULL] ?: @"";
+        [[existing stringByAppendingFormat:@"%@\n", line]
+            writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    });
 }
 
 // 手动方向开关（调试用，不影响正常逻辑）：
 // /var/mobile/Library/Preferences/com.voring.appdrawer/landscape_override
 //   内容 "1" 强制走横屏布局，"0" 强制走竖屏布局，不存在则按自动判定。
+// 结果缓存 3 秒，避免每次布局都去读盘。
 static NSInteger ADLandscapeOverrideValue(void) {
+    static NSInteger cachedValue = -2;
+    static NSTimeInterval cachedAt = 0.0;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (cachedValue != -2 && now - cachedAt < 3.0) {
+        return cachedValue;
+    }
+    cachedAt = now;
     NSString *path = [ADRequestDirectoryPath() stringByAppendingPathComponent:@"landscape_override"];
     NSString *content = [NSString stringWithContentsOfFile:path
                                                    encoding:NSUTF8StringEncoding
                                                       error:NULL];
     content = [content stringByTrimmingCharactersInSet:
                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (content.length == 0) {
-        return -1;
-    }
-    return content.integerValue;
+    cachedValue = content.length == 0 ? -1 : content.integerValue;
+    return cachedValue;
 }
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
