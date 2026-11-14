@@ -46,12 +46,13 @@ BOOL ADPrefForceScreenCoreFloating(void) {
     return [value boolValue];
 }
 
-BOOL ADPrefUseScreenCorePrivateAPI(void) {
-    id value = ADPreferences()[@"UseScreenCorePrivateAPI"];
-    if (![value respondsToSelector:@selector(boolValue)]) {
-        return NO;
+ADLauncherMode ADPrefLauncherMode(void) {
+    id value = ADPreferences()[@"LauncherMode"];
+    if (![value respondsToSelector:@selector(integerValue)]) {
+        return ADLauncherModeScreenCore;
     }
-    return [value boolValue];
+    return [value integerValue] == ADLauncherModeLaunchServices ? ADLauncherModeLaunchServices
+                                                               : ADLauncherModeScreenCore;
 }
 
 UIBlurEffectStyle ADPrefBlurStyle(void) {

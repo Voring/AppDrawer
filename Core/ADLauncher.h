@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 
-// 打开一个已安装 App。优先走系统 LaunchServices，
-// 这样 ScreenCore 的“接管系统跳转”逻辑会像聚焦搜索一样把它变成浮窗。
+// 打开一个已安装 App。
+// 默认走 ScreenCore 的浮窗接口（SCFloatingSceneManager -sc_openSplitForBundleIdentifier:），
+// 与 QuickLaunch 的做法一致；可透过偏好切回系统 LaunchServices。
 BOOL ADOpenApplication(NSString *bundleIdentifier);
