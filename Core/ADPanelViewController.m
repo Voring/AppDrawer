@@ -16,8 +16,8 @@ static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
 static CGFloat const kADPanelTopOffset = 40.0;
 static CGFloat const kADPanelMaxWidth = 430.0;
-// 整体缩小 1/3：宽、高都按 2/3 算。
-static CGFloat const kADPanelShrinkScale = 2.0 / 3.0;
+// 只把面板高度缩小 1/3（宽保持满宽/430 封顶）。
+static CGFloat const kADPanelHeightReduction = 2.0 / 3.0;
 static CGFloat const kADPanelKeyboardMinHeight = 120.0;
 static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
 static CGFloat const kADPanelMinHeight = 160.0;
@@ -88,6 +88,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 // 键盘顶边（self.view 坐标系）；0 表示当前没有键盘。位置由它推出来，不靠横竖屏判定。
 @property (nonatomic, assign) CGFloat keyboardTop;
+@property (nonatomic, strong) NSTimer *queryPollTimer;
 
 @end
 
@@ -182,6 +183,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self stopQueryPolling];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -261,13 +263,12 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     UIEdgeInsets safeArea = self.view.safeAreaInsets;
     CGFloat topLimit = safeArea.top + kADPanelEdgeGap;
 
-    // 宽度 = 可用宽 × 2/3，并再封顶 430：竖屏缩成居中的小卡片，横屏也不会拉成横幅。
-    CGFloat cardWidth = MIN((width - kADPanelSideInset * 2.0) * kADPanelShrinkScale,
-                            kADPanelMaxWidth);
+    // 宽度不变：竖屏满宽，横屏封顶 430 居中。
+    CGFloat cardWidth = MIN(width - kADPanelSideInset * 2.0, kADPanelMaxWidth);
     CGFloat originX = floor((width - cardWidth) / 2.0);
 
     CGFloat preferredHeight = floor((height - safeArea.top) * ADPrefPanelHeightPercent() *
-                                    kADPanelHeightScale * kADPanelShrinkScale);
+                                    kADPanelHeightScale * kADPanelHeightReduction);
     preferredHeight = MAX(preferredHeight, kADPanelMinHeight);
 
     // 只有一条几何约束：卡片底边不许越过键盘顶边。竖屏键盘矮 → 卡片停在偏好位置；
@@ -434,13 +435,65 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     if (!field) {
         return self.searchBar.text ?: @"";
     }
-    UITextRange *range = [field textRangeFromPosition:field.beginningOfDocument
-                                           toPosition:field.endOfDocument];
-    NSString *fullText = range ? [field textInRange:range] : nil;
-    if (fullText.length == 0) {
-        fullText = field.text ?: @"";
+    NSString *committed = field.text ?: @"";
+    NSString *markedText = nil;
+    UITextRange *markedRange = field.markedTextRange;
+    if (markedRange && !markedRange.isEmpty) {
+        markedText = [field textInRange:markedRange];
     }
-    return fullText ?: @"";
+    if (markedText.length == 0) {
+        UITextRange *all = [field textRangeFromPosition:field.beginningOfDocument
+                                             toPosition:field.endOfDocument];
+        markedText = all ? [field textInRange:all] : nil;
+    }
+    if (markedText.length == 0) {
+        // 最后一道兜底：UIKit 把未上屏内容存在这个私有槽里。
+        @try {
+            id value = [field valueForKey:@"_markedText"];
+            if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
+                markedText = value;
+            }
+        } @catch (__unused NSException *exception) {
+        }
+    }
+    if (markedText.length == 0) {
+        return committed;
+    }
+    if ([markedText hasPrefix:committed]) {
+        return markedText;
+    }
+    return [committed stringByAppendingString:markedText];
+}
+
+// 中文输入法在拼音阶段常常不发 textDidChange；编辑期间用 0.15s 轮询兜底，
+// 只要输入内容变了就重新筛。
+- (void)startQueryPolling {
+    [self stopQueryPolling];
+    __weak typeof(self) weakSelf = self;
+    self.queryPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.15
+                                                           repeats:YES
+                                                             block:^(NSTimer *_timer) {
+        [weakSelf pollQuery];
+    }];
+}
+
+- (void)stopQueryPolling {
+    [self.queryPollTimer invalidate];
+    self.queryPollTimer = nil;
+}
+
+- (void)pollQuery {
+    if (!self.searchBar.isFirstResponder) {
+        [self stopQueryPolling];
+        return;
+    }
+    NSString *raw = [self currentSearchText];
+    NSString *normalized = [[raw stringByTrimmingCharactersInSet:
+                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if ([normalized isEqualToString:self.lastAppliedQuery]) {
+        return;
+    }
+    [self applyFilterResettingOffset:YES];
 }
 
 - (void)applyFilterResettingOffset:(BOOL)resetsOffset {
@@ -517,6 +570,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 }
 
 - (void)animateOutWithCompletion:(void (^)(void))completion {
+    [self stopQueryPolling];
     [self.view endEditing:YES];
 
     _animating = YES;
@@ -660,6 +714,7 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 - (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
     [self.view.window makeKeyWindow];
     [searchBar setShowsCancelButton:YES animated:YES];
+    [self startQueryPolling];
 }
 
 - (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
@@ -668,12 +723,14 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 - (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
     [searchBar resignFirstResponder];
+    [self stopQueryPolling];
 }
 
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
     searchBar.text = @"";
     [searchBar setShowsCancelButton:NO animated:YES];
     [searchBar resignFirstResponder];
+    [self stopQueryPolling];
     [self applyFilterResettingOffset:YES];
 }
 
