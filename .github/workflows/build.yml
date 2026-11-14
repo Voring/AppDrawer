@@ -37,6 +37,12 @@ jobs:
           mv /tmp/sdks "$HOME/theos/sdks"
           ls "$HOME/theos/sdks"
 
+      # Git 不保留可执行位时 dm.pl 会报 “bad permissions 644”，这里强制修正。
+      - name: Fix maintainer script permissions
+        run: |
+          chmod 755 layout/DEBIAN/postinst layout/DEBIAN/postrm
+          ls -l layout/DEBIAN
+
       - name: Build roothide package
         run: |
           set -o pipefail
