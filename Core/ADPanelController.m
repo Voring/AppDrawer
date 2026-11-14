@@ -163,6 +163,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     };
 
     _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
+    // 取当前方向的场景坐标：横竖屏在唤醒时判定一次，之后不做实时跟随。
     _window.frame = scene.coordinateSpace.bounds;
     // 之前是 10000001，和系统键盘窗口同档：面板会把键盘窗口盖住/顶不上去。
     // 降到 Alert + 1（约 2001）：高于 SpringBoard 内容，又低于键盘窗口。
