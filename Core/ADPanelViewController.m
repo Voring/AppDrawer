@@ -463,6 +463,11 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     if (markedText.length == 0) {
         return committed;
     }
+    // 多音节拼音时，field.text 往往已经包含整串（如 "weixin"），而 markedTextRange
+    // 只覆盖后面那一段（"xin"）。这时不能再拼一遍，否则查询会变成 "weixinxin"。
+    if ([committed hasSuffix:markedText]) {
+        return committed;
+    }
     if ([markedText hasPrefix:committed]) {
         return markedText;
     }
