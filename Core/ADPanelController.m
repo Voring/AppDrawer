@@ -1,17 +1,13 @@
 #import "ADPanelController.h"
 
-#import <CaptainHook/CaptainHook.h>
 #import <UIKit/UIKit.h>
-#import <objc/message.h>
 
 #import "../Shared/URLScheme/ADURLScheme.h"
 #import "ADAppCatalog.h"
 #import "ADLauncher.h"
 #import "ADPanelViewController.h"
 
-CHDeclareClass(UIWindow);
-
-#pragma mark - 面板窗口
+#pragma mark - 面板窗口（仅在无法嵌入 SpringBoard 自己的窗口时使用）
 
 @interface ADPanelWindow : UIWindow
 @end
@@ -25,8 +21,6 @@ CHDeclareClass(UIWindow);
 @end
 
 #pragma mark - 工具
-
-static ADPanelWindow *ADActivePanelWindow = nil;
 
 static UIWindowScene *ADActiveWindowScene(void) {
     UIApplication *application = [UIApplication sharedApplication];
@@ -47,15 +41,21 @@ static UIWindowScene *ADActiveWindowScene(void) {
 }
 
 static UIWindow *ADKeyWindowOfScene(UIWindowScene *scene) {
+    UIWindow *candidate = nil;
     for (UIWindow *window in scene.windows) {
+        if (window.hidden || window.alpha <= 0.01) {
+            continue;
+        }
         if (window.isKeyWindow) {
             return window;
         }
+        if (!candidate) {
+            candidate = window;
+        }
     }
-    return scene.windows.firstObject;
+    return candidate ?: scene.windows.firstObject;
 }
 
-// 不用已废弃的 UIApplication.keyWindow，自己扫一遍 connectedScenes。
 static UIWindow *ADApplicationKeyWindow(void) {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (scene.activationState != UISceneActivationStateForegroundActive) {
@@ -71,32 +71,6 @@ static UIWindow *ADApplicationKeyWindow(void) {
         }
     }
     return nil;
-}
-
-// SpringBoard 会时不时把自己的主窗口重新设成 key window，
-// 面板窗口一旦丢 key，键盘就没有落点。这里在别的窗口抢 key 时把面板抢回来。
-CHOptimizedMethod0(self, void, UIWindow, makeKeyWindow) {
-    CHSuper0(UIWindow, makeKeyWindow);
-
-    ADPanelWindow *panelWindow = ADActivePanelWindow;
-    if (panelWindow && self != panelWindow && !panelWindow.hidden && [NSThread isMainThread]) {
-        [panelWindow makeKeyWindow];
-    }
-}
-
-static void ADAttemptPrivateKeyboardFocus(UIWindow *window) {
-    id application = [UIApplication sharedApplication];
-    NSArray<NSString *> *selectors = @[ @"_setKeyboardFocusWindow:", @"setKeyboardFocusWindow:" ];
-    for (NSString *selectorName in selectors) {
-        SEL selector = NSSelectorFromString(selectorName);
-        if ([application respondsToSelector:selector]) {
-            @try {
-                ((void (*)(id, SEL, id))objc_msgSend)(application, selector, window);
-            } @catch (__unused NSException *exception) {
-            }
-            return;
-        }
-    }
 }
 
 static NSString *ADURLQueryValue(NSURL *URL, NSString *name) {
@@ -126,9 +100,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 #pragma mark - 控制器
 
 @implementation ADPanelController {
-    ADPanelWindow *_window;
     ADPanelViewController *_panel;
-    UIWindow *_previousKeyWindow;
+    ADPanelWindow *_window;      // 独立窗口模式
+    UIWindow *_hostWindow;       // 嵌入 SpringBoard 自身窗口模式
     BOOL _visible;
 }
 
@@ -144,11 +118,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 - (instancetype)init {
     self = [super init];
     if (self) {
-        if (NSClassFromString(@"UIWindow")) {
-            CHLoadClass(UIWindow);
-            CHHook0(UIWindow, makeKeyWindow);
-        }
-
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         (__bridge const void *)self,
                                         ADOpenRequestCallback,
@@ -187,13 +156,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
         return;
     }
 
-    _previousKeyWindow = ADKeyWindowOfScene(scene);
-
-    _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
-    _window.frame = scene.coordinateSpace.bounds;
-    _window.windowLevel = 10000001.0;
-    _window.backgroundColor = [UIColor clearColor];
-    _window.opaque = NO;
+    UIWindow *hostWindow = ADKeyWindowOfScene(scene);
 
     _panel = [[ADPanelViewController alloc] init];
     __weak typeof(self) weakSelf = self;
@@ -204,13 +167,16 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       [weakSelf openApplication:bundleIdentifier];
     };
 
-    _window.rootViewController = _panel;
-    _window.hidden = NO;
-    [_window makeKeyAndVisible];
-    _visible = YES;
-    ADActivePanelWindow = _window;
+    // 关键：优先把面板塞进 SpringBoard 自己的窗口。
+    // 键盘(event)只认 key window，自己另开一个窗口在 SpringBoard 里迟早会丢 key，
+    // 塞进系统窗口最省事，也不会和 ScreenCore 抢窗口层级。
+    if ([self _embedPanelIntoWindow:hostWindow]) {
+        _hostWindow = hostWindow;
+    } else {
+        [self _presentInOwnWindowWithScene:scene];
+    }
 
-    ADAttemptPrivateKeyboardFocus(_window);
+    _visible = YES;
 
     [_panel setApplications:[ADAppCatalog cachedApplications]];
     [_panel setQuery:query];
@@ -221,17 +187,44 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     [self _refreshApplications];
     [self _writeDiagnostics:@"after-show"];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+    // 等面板真正上屏再叫键盘，避免 SpringBoard 把 firstResponder 重置掉。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
                      ADPanelController *strongSelf = weakSelf;
-                     if (!strongSelf || !strongSelf->_visible || !strongSelf->_window) {
+                     if (!strongSelf || !strongSelf->_visible || !strongSelf->_panel) {
                          return;
                      }
-                     [strongSelf->_window makeKeyWindow];
-                     ADAttemptPrivateKeyboardFocus(strongSelf->_window);
+                     [strongSelf->_panel.view.window makeKeyWindow];
                      [strongSelf->_panel focusSearchField];
-                     [strongSelf _writeDiagnostics:@"0.5s-later"];
+                     [strongSelf _writeDiagnostics:@"0.25s-later"];
                    });
+}
+
+- (BOOL)_embedPanelIntoWindow:(UIWindow *)window {
+    if (!window || window.hidden) {
+        return NO;
+    }
+    CGRect bounds = window.bounds;
+    if (CGRectGetWidth(bounds) < 1.0 || CGRectGetHeight(bounds) < 1.0) {
+        return NO;
+    }
+
+    UIView *panelView = _panel.view;
+    panelView.frame = bounds;
+    panelView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [window addSubview:panelView];
+    return YES;
+}
+
+- (void)_presentInOwnWindowWithScene:(UIWindowScene *)scene {
+    _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
+    _window.frame = scene.coordinateSpace.bounds;
+    _window.windowLevel = 10000001.0;
+    _window.backgroundColor = [UIColor clearColor];
+    _window.opaque = NO;
+    _window.rootViewController = _panel;
+    _window.hidden = NO;
+    [_window makeKeyAndVisible];
 }
 
 - (void)openApplication:(NSString *)bundleIdentifier {
@@ -239,7 +232,12 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
         return;
     }
     [self hidePanelWithCompletion:^{
-      ADOpenApplication(bundleIdentifier);
+      // 面板收起动画跑完再发跳转请求：ScreenCore 建浮窗场景本身很重，
+      // 和收起动画挤在同一个 runloop 里就会卡住 SpringBoard。
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), ^{
+                       ADOpenApplication(bundleIdentifier);
+                     });
     }];
 }
 
@@ -275,16 +273,20 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
           return;
       }
 
-      UIWindow *previousKeyWindow = strongSelf->_previousKeyWindow;
-      ADActivePanelWindow = nil;
-      strongSelf->_window.hidden = YES;
-      [strongSelf->_window resignKeyWindow];
-      strongSelf->_window.rootViewController = nil;
-      strongSelf->_window = nil;
-      strongSelf->_panel = nil;
-      strongSelf->_previousKeyWindow = nil;
+      [panel.view removeFromSuperview];
 
-      if (previousKeyWindow) {
+      UIWindow *previousKeyWindow = nil;
+      if (strongSelf->_window) {
+          previousKeyWindow = ADKeyWindowOfScene(strongSelf->_window.windowScene);
+          strongSelf->_window.hidden = YES;
+          [strongSelf->_window resignKeyWindow];
+          strongSelf->_window.rootViewController = nil;
+          strongSelf->_window = nil;
+      }
+      strongSelf->_hostWindow = nil;
+      strongSelf->_panel = nil;
+
+      if (previousKeyWindow && !previousKeyWindow.isKeyWindow) {
           [previousKeyWindow makeKeyWindow];
       }
       if (completion) {
@@ -312,25 +314,18 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 // 面板 / 键盘状态写盘，真机出问题时可以直接用 Filza 打开查看。
 - (void)_writeDiagnostics:(NSString *)stage {
     @autoreleasepool {
+        UIWindow *panelWindow = _panel.view.window;
         UIWindow *applicationKeyWindow = ADApplicationKeyWindow();
-        UIWindowScene *scene = _window.windowScene;
-        UIWindow *sceneKeyWindow = nil;
-        for (UIWindow *window in scene.windows) {
-            if (window.isKeyWindow) {
-                sceneKeyWindow = window;
-            }
-        }
 
         NSString *report = [NSString stringWithFormat:
-            @"stage=%@\ntime=%@\npanelVisible=%d\nappKeyWindow=%@\npanelWindowIsKey=%d\npanelWindowHidden=%d\nsceneKeyWindow=%@\nsceneWindowCount=%lu\nsearchFieldFirstResponder=%d\n",
+            @"stage=%@\ntime=%@\npanelVisible=%d\nhostMode=%@\npanelWindowClass=%@\npanelWindowIsKey=%d\nappKeyWindow=%@\nsearchFieldFirstResponder=%d\n",
             stage,
             [NSDate date],
             (int)_visible,
+            _hostWindow ? @"embedded" : @"own-window",
+            NSStringFromClass([panelWindow class]),
+            (int)panelWindow.isKeyWindow,
             NSStringFromClass([applicationKeyWindow class]),
-            (int)_window.isKeyWindow,
-            (int)_window.hidden,
-            NSStringFromClass([sceneKeyWindow class]),
-            (unsigned long)scene.windows.count,
             (int)[_panel isSearchFieldFirstResponder]];
 
         NSString *directory = ADRequestDirectoryPath();
