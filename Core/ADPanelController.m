@@ -165,9 +165,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
     // 取当前方向的场景坐标：横竖屏在唤醒时判定一次，之后不做实时跟随。
     _window.frame = scene.coordinateSpace.bounds;
-    // 之前是 10000001，和系统键盘窗口同档：面板会把键盘窗口盖住/顶不上去。
-    // 降到 Alert + 1（约 2001）：高于 SpringBoard 内容，又低于键盘窗口。
-    _window.windowLevel = UIWindowLevelAlert + 1.0;
+    // 1.0.3 起就用这个层级，1.0.7 键盘可用时也是它。
+    _window.windowLevel = 10000001.0;
     _window.backgroundColor = [UIColor clearColor];
     _window.opaque = NO;
     _window.rootViewController = _panel;
@@ -277,6 +276,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 // 关键：清理动作不挂在动画 completion 上，主线程被卡住时也能保证覆盖层移除。
 - (void)_teardownPanelSynchronously {
     _teardownToken++;
+    _keyboardShown = NO;
     if (_panel) {
         [_panel.view endEditing:YES];
         [_panel.view removeFromSuperview];
@@ -380,11 +380,29 @@ static NSUInteger ADKeyboardWindowCount(void) {
             [rootSubviews addObject:NSStringFromCGRect(subview.frame)];
         }
 
+        UIWindow *keyWindow = nil;
+        for (UIWindow *window in _window.windowScene.windows) {
+            if (window.isKeyWindow) {
+                keyWindow = window;
+                break;
+            }
+        }
+        NSString *searchFieldInfo = @"none";
+        UISearchBar *searchBar = [self _panelSearchBar];
+        if (searchBar) {
+            UITextField *field = searchBar.searchTextField;
+            BOOL sameWindow = (field.window == _window);
+            searchFieldInfo = [NSString stringWithFormat:
+                @"frame=%@,fieldWindowIsPanel=%d,alpha=%.2f,hidden=%d,enabled=%d",
+                NSStringFromCGRect(field.frame), (int)sameWindow,
+                field.alpha, (int)field.isHidden, (int)field.enabled];
+        }
+
         NSString *report = [NSString stringWithFormat:
             @"stage=%@\ntime=%@\nvisible=%d\npanelWindowClass=%@\npanelWindowIsKey=%d\n"
             @"panelWindowHidden=%d\nwindowLevel=%.0f\nviewBounds=%.0fx%.0f\n"
             @"sceneState=%@\nfirstResponder=%d\nkeyboardWindowCount=%lu\nkeyboardWindows=%@\n"
-            @"rootSubviews=%@\n",
+            @"rootSubviews=%@\nkeyWindowClass=%@\nsearchField=%@\n",
             stage,
             [NSDate date],
             (int)_visible,
@@ -398,7 +416,9 @@ static NSUInteger ADKeyboardWindowCount(void) {
             (int)[_panel isSearchFieldFirstResponder],
             (unsigned long)ADKeyboardWindowCount(),
             ADKeyboardWindowSummary(),
-            [rootSubviews componentsJoinedByString:@"|"] ?: @"none"];
+            [rootSubviews componentsJoinedByString:@"|"] ?: @"none",
+            keyWindow ? NSStringFromClass([keyWindow class]) : @"none",
+            searchFieldInfo];
 
         NSString *directory = ADRequestDirectoryPath();
         [[NSFileManager defaultManager] createDirectoryAtPath:directory
@@ -410,6 +430,24 @@ static NSUInteger ADKeyboardWindowCount(void) {
                     encoding:NSUTF8StringEncoding
                        error:NULL];
     }
+}
+
+- (UISearchBar *)_panelSearchBar {
+    if (!_panel) {
+        return nil;
+    }
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:_panel.view];
+    while (queue.count > 0) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:[UISearchBar class]]) {
+            return (UISearchBar *)view;
+        }
+        for (UIView *child in view.subviews) {
+            [queue addObject:child];
+        }
+    }
+    return nil;
 }
 
 #pragma mark - URL 指令
