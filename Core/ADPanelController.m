@@ -166,13 +166,39 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     [_panel animateIn];
 
     [self _refreshApplications];
+    [self _scheduleKeyboardRetries];
+}
+
+// SpringBoard 会在场景激活时把自己的窗口重新设回 key window，
+// 我们的搜索框即便拿到 first responder，窗口一旦丢 key，键盘就会被 UIKit 抑制。
+// 所以在头两秒里反复把 key 抢回来并重新聚焦。
+- (void)_scheduleKeyboardRetries {
+    NSArray<NSNumber *> *delays = @[@0.20, @0.45, @0.80, @1.30, @2.00];
+    __weak typeof(self) weakSelf = self;
+
+    for (NSNumber *number in delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(number.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+                         ADPanelController *strongSelf = weakSelf;
+                         if (!strongSelf || !strongSelf->_visible || !strongSelf->_panel ||
+                             !strongSelf->_window) {
+                             return;
+                         }
+                         [strongSelf->_window makeKeyWindow];
+                         [strongSelf->_panel focusSearchField];
+                         [strongSelf _writeDiagnostics:[NSString stringWithFormat:
+                                                                  @"retry-%@s", number]];
+                       });
+    }
 }
 
 - (void)openApplication:(NSString *)bundleIdentifier {
     if (bundleIdentifier.length == 0) {
         return;
     }
-    // 先把覆盖层无条件摘掉，再发跳转；不等动画 completion，避免主线程卡住时面板残留。
+    // 先把覆盖层无条件摘掉，再隔一个 runloop 发跳转；
+    // ScreenCore 建浮窗场景不能和「面板收起」挤在同一帧。
     [self hidePanel];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -235,6 +261,75 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       }
       [strongSelf->_panel setApplications:applications];
     }];
+}
+
+#pragma mark - 诊断
+
+// 记录面板/键盘状态，真机排查时用 Filza 打开
+// /var/mobile/Library/Preferences/com.voring.appdrawer/diag.txt 即可。
+static NSString *ADKeyboardWindowSummary(void) {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            NSString *className = NSStringFromClass([window class]);
+            if ([className rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location !=
+                NSNotFound) {
+                [names addObject:[NSString stringWithFormat:@"%@(key=%d,hidden=%d)",
+                                                            className,
+                                                            (int)window.isKeyWindow,
+                                                            (int)window.isHidden]];
+            }
+        }
+    }
+    return names.count ? [names componentsJoinedByString:@"|"] : @"none";
+}
+
+- (void)_writeDiagnostics:(NSString *)stage {
+    @autoreleasepool {
+        UIWindowScene *scene = _window.windowScene;
+        NSString *activation = @"unknown";
+        switch (scene.activationState) {
+            case UISceneActivationStateForegroundActive:
+                activation = @"foregroundActive";
+                break;
+            case UISceneActivationStateForegroundInactive:
+                activation = @"foregroundInactive";
+                break;
+            case UISceneActivationStateBackground:
+                activation = @"background";
+                break;
+            case UISceneActivationStateUnattached:
+                activation = @"unattached";
+                break;
+            default:
+                break;
+        }
+
+        NSString *report = [NSString stringWithFormat:
+            @"stage=%@\ntime=%@\nvisible=%d\npanelWindowClass=%@\npanelWindowIsKey=%d\n"
+            @"sceneState=%@\nfirstResponder=%d\nkeyboardWindows=%@\n",
+            stage,
+            [NSDate date],
+            (int)_visible,
+            NSStringFromClass([_window class]),
+            (int)_window.isKeyWindow,
+            activation,
+            (int)[_panel isSearchFieldFirstResponder],
+            ADKeyboardWindowSummary()];
+
+        NSString *directory = ADRequestDirectoryPath();
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        [report writeToFile:[directory stringByAppendingPathComponent:@"diag.txt"]
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:NULL];
+    }
 }
 
 #pragma mark - URL 指令
