@@ -164,7 +164,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
     _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
     _window.frame = scene.coordinateSpace.bounds;
-    _window.windowLevel = 10000001.0;
+    // 之前是 10000001，和系统键盘窗口同档：面板会把键盘窗口盖住/顶不上去。
+    // 降到 Alert + 1（约 2001）：高于 SpringBoard 内容，又低于键盘窗口。
+    _window.windowLevel = UIWindowLevelAlert + 1.0;
     _window.backgroundColor = [UIColor clearColor];
     _window.opaque = NO;
     _window.rootViewController = _panel;
@@ -205,7 +207,12 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                          if (strongSelf->_keyboardShown) {
                              return;
                          }
-                         [strongSelf->_window makeKeyWindow];
+                         [strongSelf->_window makeKeyAndVisible];
+                         // 已经是第一响应者时再调 becomeFirstResponder 是空操作，
+                         // 键盘不会被重新呈现，所以先 resign 再聚焦。
+                         if ([strongSelf->_panel isSearchFieldFirstResponder]) {
+                             [strongSelf->_panel.view endEditing:YES];
+                         }
                          [strongSelf->_panel focusSearchField];
                          [strongSelf _writeDiagnostics:[NSString stringWithFormat:
                                                                   @"retry-%@s", number]];
@@ -367,9 +374,9 @@ static NSUInteger ADKeyboardWindowCount(void) {
         }
 
         CGRect viewBounds = _panel.view.bounds;
-        NSMutableArray<NSString *> *searchBars = [NSMutableArray array];
+        NSMutableArray<NSString *> *rootSubviews = [NSMutableArray array];
         for (UIView *subview in _panel.view.subviews) {
-            [searchBars addObject:NSStringFromCGRect(subview.frame)];
+            [rootSubviews addObject:NSStringFromCGRect(subview.frame)];
         }
 
         NSString *report = [NSString stringWithFormat:
@@ -390,7 +397,7 @@ static NSUInteger ADKeyboardWindowCount(void) {
             (int)[_panel isSearchFieldFirstResponder],
             (unsigned long)ADKeyboardWindowCount(),
             ADKeyboardWindowSummary(),
-            [searchBars componentsJoinedByString:@"|"] ?: @"none"];
+            [rootSubviews componentsJoinedByString:@"|"] ?: @"none"];
 
         NSString *directory = ADRequestDirectoryPath();
         [[NSFileManager defaultManager] createDirectoryAtPath:directory
