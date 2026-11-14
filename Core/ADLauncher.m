@@ -260,7 +260,7 @@ static BOOL ADTrySpringBoardServices(NSString *bundleIdentifier) {
           launchFunction = (LaunchFunction)dlsym(handle, "SBSLaunchApplicationWithIdentifier");
       }
       if (!launchFunction) {
-          launchFunction = (LaunchFunction)dlsym(RLTD_DEFAULT, "SBSLaunchApplicationWithIdentifier");
+          launchFunction = (LaunchFunction)dlsym(RTLD_DEFAULT, "SBSLaunchApplicationWithIdentifier");
       }
     });
 
