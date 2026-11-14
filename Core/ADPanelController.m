@@ -1,6 +1,7 @@
 #import "ADPanelController.h"
 
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #import "../Shared/URLScheme/ADURLScheme.h"
 #import "ADAppCatalog.h"
@@ -12,16 +13,124 @@
 // 独立面板窗口：1.0.3 起固定用这个，不再嵌进 SpringBoard 自己的窗口。
 // 1.0.2 嵌进 SpringBoard key window 的那次导致主线程卡死 + 覆盖层永久残留，
 // 不能再走。
-@interface ADPanelWindow : UIWindow
+//
+// 1.1.7：窗口基类从裸 UIWindow 换成 SpringBoard 自己的 SBWindow（优先
+// SBTransientOverlayWindow）。原因：SpringBoard 里键盘焦点由 traits participant
+// 决定，裸 UIWindow 没有 participant，所以 medusa 永远不把
+// SBMedusaHostedKeyboardWindow 显出来——日志里 isKey=1、responder=1 但键盘
+// hidden=1 正是这个症状。
+// 注意：这是「我们自己新建一个 SB 窗口实例」，不是把面板塞进 SpringBoard 现有
+// 的 key window，后者才是 1.0.2 事故的来源。
+static NSString *const ADPanelTraitsRole = @"SBTraitsParticipantRoleTransientOverlay";
+static NSString *const ADPanelDebugName = @"AppDrawerPanel";
+
+@interface ADPanelPlainWindow : UIWindow
 @end
 
-@implementation ADPanelWindow
-
+@implementation ADPanelPlainWindow
 - (BOOL)canBecomeKeyWindow {
     return YES;
 }
-
 @end
+
+static BOOL ADWindowCanBecomeKeyIMP(id self, SEL _cmd) {
+    return YES;
+}
+
+// 运行时在 SBWindow 之上注册一个我们自己的子类（名字仍是 ADPanelWindow，
+// 方便日志辨认），并允许它成为 key window。不改动系统类本身。
+static Class ADPanelWindowClass(NSString **outBaseName) {
+    static Class panelClass;
+    static NSString *baseName;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      Class base = NSClassFromString(@"SBTransientOverlayWindow");
+      if (!base || ![base isSubclassOfClass:[UIWindow class]]) {
+          base = NSClassFromString(@"SBWindow");
+      }
+      if (!base || ![base isSubclassOfClass:[UIWindow class]]) {
+          base = [ADPanelPlainWindow class];
+      }
+      baseName = NSStringFromClass(base);
+      Class cls = objc_allocateClassPair(base, "ADPanelWindow", 0);
+      if (cls) {
+          class_addMethod(cls, @selector(canBecomeKeyWindow), (IMP)ADWindowCanBecomeKeyIMP, "B@:");
+          // SBWindow 内部用的是私有版本，也一并放行。
+          class_addMethod(cls, @selector(_canBecomeKeyWindow), (IMP)ADWindowCanBecomeKeyIMP, "B@:");
+          objc_registerClassPair(cls);
+          panelClass = cls;
+      }
+    });
+    if (outBaseName) {
+        *outBaseName = baseName;
+    }
+    return panelClass;
+}
+
+// 按 SBWindow 的初始化签名依次尝试，任何一步失败都回落到裸 UIWindow。
+// 这些私有签名在 SDK 里没有声明，只能用实例方法指针调用。
+typedef id (*ADLayoutInitFn)(id, SEL, id, id, id, id, id);
+typedef id (*ADRoleInitFn)(id, SEL, id, id, id, id);
+typedef id (*ADSceneRoleInitFn)(id, SEL, id, id, id);
+typedef id (*ADStrategyFn)(id, SEL);
+
+static UIWindow *ADCreatePanelWindow(UIWindowScene *scene, UIViewController *controller) {
+    Class cls = ADPanelWindowClass(NULL);
+    if (cls && ![cls isSubclassOfClass:[ADPanelPlainWindow class]]) {
+        SEL layoutSel = NSSelectorFromString(
+            @"initWithWindowScene:rootViewController:layoutStrategy:role:debugName:");
+        SEL roleSel = NSSelectorFromString(@"initWithWindowScene:rootViewController:role:debugName:");
+        SEL sceneRoleSel = NSSelectorFromString(@"initWithWindowScene:role:debugName:");
+
+        @try {
+            if ([cls instancesRespondToSelector:layoutSel]) {
+                id strategy = nil;
+                SEL strategySel = NSSelectorFromString(@"defaultLayoutStrategy");
+                if ([cls respondsToSelector:strategySel]) {
+                    ADStrategyFn strategyFn = (ADStrategyFn)[cls methodForSelector:strategySel];
+                    strategy = strategyFn(cls, strategySel);
+                }
+                ADLayoutInitFn initFn = (ADLayoutInitFn)[cls instanceMethodForSelector:layoutSel];
+                UIWindow *window = initFn([cls alloc], layoutSel, scene, controller, strategy,
+                                          ADPanelTraitsRole, ADPanelDebugName);
+                if ([window isKindOfClass:[UIWindow class]]) {
+                    return window;
+                }
+            }
+        } @catch (NSException *exception) {
+            NSLog(@"[AppDrawer] SBWindow layout init failed: %@", exception.reason);
+        }
+
+        @try {
+            if ([cls instancesRespondToSelector:roleSel]) {
+                ADRoleInitFn initFn = (ADRoleInitFn)[cls instanceMethodForSelector:roleSel];
+                UIWindow *window = initFn([cls alloc], roleSel, scene, controller, ADPanelTraitsRole,
+                                          ADPanelDebugName);
+                if ([window isKindOfClass:[UIWindow class]]) {
+                    return window;
+                }
+            }
+        } @catch (NSException *exception) {
+            NSLog(@"[AppDrawer] SBWindow role init failed: %@", exception.reason);
+        }
+
+        @try {
+            if ([cls instancesRespondToSelector:sceneRoleSel]) {
+                ADSceneRoleInitFn initFn = (ADSceneRoleInitFn)[cls instanceMethodForSelector:sceneRoleSel];
+                UIWindow *window = initFn([cls alloc], sceneRoleSel, scene, ADPanelTraitsRole,
+                                          ADPanelDebugName);
+                if ([window isKindOfClass:[UIWindow class]]) {
+                    window.rootViewController = controller;
+                    return window;
+                }
+            }
+        } @catch (NSException *exception) {
+            NSLog(@"[AppDrawer] SBWindow scene init failed: %@", exception.reason);
+        }
+    }
+
+    return [[ADPanelPlainWindow alloc] initWithWindowScene:scene];
+}
 
 #pragma mark - 工具
 
@@ -71,7 +180,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
 @implementation ADPanelController {
     ADPanelViewController *_panel;
-    ADPanelWindow *_window;
+    UIWindow *_window;
     BOOL _visible;
     // 收起动画的「代次」：每次 show/hide 都自增，过期的延时清理直接作废。
     NSUInteger _teardownToken;
@@ -168,7 +277,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       [weakSelf openApplication:bundleIdentifier];
     };
 
-    _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
+    _window = ADCreatePanelWindow(scene, _panel);
     // 取当前方向的场景坐标：横竖屏在唤醒时判定一次，之后不做实时跟随。
     _window.frame = scene.coordinateSpace.bounds;
     // 1.0.7 键盘可用时就是这个层级，回退到它。
@@ -319,6 +428,27 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 // 追加式日志，真机排查时用 Filza 打开
 // /var/mobile/Library/Preferences/com.voring.appdrawer/diag.txt 即可。
 // 覆盖写会丢掉时序（上一次就出现「键盘通知是在面板摘掉之后才到的」），所以按阶段追加。
+// 窗口到底是 SB 窗口还是裸 UIWindow，以及有没有 traits participant。
+static NSString *ADWindowKind(UIWindow *window) {
+    if (!window) {
+        return @"none";
+    }
+    Class sbWindowClass = NSClassFromString(@"SBWindow");
+    if (sbWindowClass && [window isKindOfClass:sbWindowClass]) {
+        NSString *traits = @"nil";
+        @try {
+            id participant = [window performSelector:@selector(_traitsParticipant)];
+            if (participant) {
+                traits = NSStringFromClass([participant class]);
+            }
+        } @catch (NSException *exception) {
+        }
+        return [NSString stringWithFormat:@"%@(SB,traits=%@)", NSStringFromClass([window class]),
+                                          traits];
+    }
+    return [NSString stringWithFormat:@"%@(plainUIWindow)", NSStringFromClass([window class])];
+}
+
 static NSString *ADKeyboardWindowSummary(void) {
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -396,7 +526,7 @@ static NSString *ADKeyboardWindowSummary(void) {
             [NSDate date],
             stage,
             (int)_visible,
-            NSStringFromClass([_window class]),
+            ADWindowKind(_window),
             (int)_window.isKeyWindow,
             (int)_window.isHidden,
             _window.windowLevel,
