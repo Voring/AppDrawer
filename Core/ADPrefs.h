@@ -7,4 +7,6 @@ CGFloat ADPrefPanelHeightPercent(void);
 CGFloat ADPrefPanelCornerRadius(void);
 BOOL ADPrefShowSystemApps(void);
 BOOL ADPrefForceScreenCoreFloating(void);
+// 默认 NO：不走 ScreenCore 私有接口，只走系统 LaunchServices 链路。
+BOOL ADPrefUseScreenCorePrivateAPI(void);
 UIBlurEffectStyle ADPrefBlurStyle(void);

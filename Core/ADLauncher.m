@@ -5,6 +5,8 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
+#import "ADPrefs.h"
+
 #pragma mark - NSInvocation 参数填充（按真实类型，避免把 BOOL 当 void 或把结构体当指针）
 
 static void ADSetObjectArgument(NSInvocation *invocation, NSUInteger index, id object) {
@@ -277,13 +279,21 @@ BOOL ADOpenApplication(NSString *bundleIdentifier) {
         return NO;
     }
 
-    if (ADTryScreenCoreFloating(bundleIdentifier)) {
-        // 只发一次请求：ScreenCore 建浮窗场景本身很重。
-        return YES;
-    }
-
+    // 主路径：系统 LaunchServices 链路。ScreenCore 接管的就是系统跳转，
+    // 聚焦搜索走的也是这条路；不直接碰它的私有接口。
     if (ADTryLaunchServices(bundleIdentifier)) {
         return YES;
     }
+
+    // 可选增强：私有 ScreenCore 接口，默认关闭。
+    // 只有偏好里把 UseScreenCorePrivateAPI 置 YES 才尝试；整段包在 @try 里，
+    // 私有方法抛异常不能把 SpringBoard 带崩。
+    if (ADPrefUseScreenCorePrivateAPI()) {
+        @try {
+            ADTryScreenCoreFloating(bundleIdentifier);
+        } @catch (__unused NSException *exception) {
+        }
+    }
+
     return ADTrySpringBoardServices(bundleIdentifier);
 }

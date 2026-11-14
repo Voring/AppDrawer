@@ -46,6 +46,14 @@ BOOL ADPrefForceScreenCoreFloating(void) {
     return [value boolValue];
 }
 
+BOOL ADPrefUseScreenCorePrivateAPI(void) {
+    id value = ADPreferences()[@"UseScreenCorePrivateAPI"];
+    if (![value respondsToSelector:@selector(boolValue)]) {
+        return NO;
+    }
+    return [value boolValue];
+}
+
 UIBlurEffectStyle ADPrefBlurStyle(void) {
     id value = ADPreferences()[@"BlurStyle"];
     NSInteger style = [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 0;
