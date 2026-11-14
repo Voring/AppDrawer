@@ -119,6 +119,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
 - (void)_handleKeyboardWillShow:(NSNotification *)notification {
     _keyboardShown = YES;
+    [self _writeDiagnostics:@"keyboard-will-show"];
 }
 
 - (BOOL)isPanelVisible {
@@ -181,13 +182,12 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
     [self _refreshApplications];
     [self _scheduleKeyboardRetries];
+    [self _writeDiagnostics:@"show"];
 }
 
 // SpringBoard 会在场景激活时把自己的窗口重新设回 key window，
 // 我们的搜索框即便拿到 first responder，窗口一旦丢 key，键盘就会被 UIKit 抑制。
 // 所以在头两秒里反复把 key 抢回来并重新聚焦。
-// 一旦 UIKeyboardWillShowNotification 到了（键盘真的弹出来了），就停止重试，
-// 把控制权还给用户，避免和第三方输入法自带的「收起键盘」打架。
 - (void)_scheduleKeyboardRetries {
     NSArray<NSNumber *> *delays = @[@0.20, @0.45, @0.80, @1.30, @2.00];
     __weak typeof(self) weakSelf = self;
@@ -207,7 +207,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                          }
                          [strongSelf->_window makeKeyWindow];
                          [strongSelf->_panel focusSearchField];
-                         [strongSelf _writeDiagnostics:[NSString stringWithFormat:@"retry-%@s", number]];
+                         [strongSelf _writeDiagnostics:[NSString stringWithFormat:
+                                                                  @"retry-%@s", number]];
                        });
     }
 }
@@ -265,9 +266,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 }
 
 // 同步、幂等地把面板从事件链和窗口上摘掉。
+// 关键：清理动作不挂在动画 completion 上，主线程被卡住时也能保证覆盖层移除。
 - (void)_teardownPanelSynchronously {
     _teardownToken++;
-    _keyboardShown = NO;
     if (_panel) {
         [_panel.view endEditing:YES];
         [_panel.view removeFromSuperview];
@@ -327,6 +328,23 @@ static NSString *ADKeyboardWindowSummary(void) {
     return names.count ? [names componentsJoinedByString:@"|"] : @"none";
 }
 
+static NSUInteger ADKeyboardWindowCount(void) {
+    NSUInteger count = 0;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            NSString *className = NSStringFromClass([window class]);
+            if ([className rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location !=
+                NSNotFound) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
 - (void)_writeDiagnostics:(NSString *)stage {
     @autoreleasepool {
         UIWindowScene *scene = _window.windowScene;
@@ -348,17 +366,31 @@ static NSString *ADKeyboardWindowSummary(void) {
                 break;
         }
 
+        CGRect viewBounds = _panel.view.bounds;
+        NSMutableArray<NSString *> *searchBars = [NSMutableArray array];
+        for (UIView *subview in _panel.view.subviews) {
+            [searchBars addObject:NSStringFromCGRect(subview.frame)];
+        }
+
         NSString *report = [NSString stringWithFormat:
             @"stage=%@\ntime=%@\nvisible=%d\npanelWindowClass=%@\npanelWindowIsKey=%d\n"
-            @"sceneState=%@\nfirstResponder=%d\nkeyboardWindows=%@\n",
+            @"panelWindowHidden=%d\nwindowLevel=%.0f\nviewBounds=%.0fx%.0f\n"
+            @"sceneState=%@\nfirstResponder=%d\nkeyboardWindowCount=%lu\nkeyboardWindows=%@\n"
+            @"rootSubviews=%@\n",
             stage,
             [NSDate date],
             (int)_visible,
             NSStringFromClass([_window class]),
             (int)_window.isKeyWindow,
+            (int)_window.isHidden,
+            _window.windowLevel,
+            viewBounds.size.width,
+            viewBounds.size.height,
             activation,
             (int)[_panel isSearchFieldFirstResponder],
-            ADKeyboardWindowSummary()];
+            (unsigned long)ADKeyboardWindowCount(),
+            ADKeyboardWindowSummary(),
+            [searchBars componentsJoinedByString:@"|"] ?: @"none"];
 
         NSString *directory = ADRequestDirectoryPath();
         [[NSFileManager defaultManager] createDirectoryAtPath:directory
