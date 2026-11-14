@@ -7,9 +7,9 @@
 #import "ADPrefs.h"
 #import "ADURLScheme.h"
 
-// 重写版（1.3.x）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
+// 重写版（1.4.x）：只有一套竖屏布局，横屏时它就是同一套参数按窗口宽度/高度自然拉伸。
 // 没有任何 isLandscape 判定、没有任何 view.frame / transform 的强制改写。
-// 位置只由两个量决定：一个固定偏好偏移，和键盘顶边。
+// 高度固定 200；位置只由两个量决定：一个固定偏好偏移，和键盘顶边。
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 
@@ -35,14 +35,8 @@ static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
 static CGFloat const kADPanelTopOffset = 40.0;
 static CGFloat const kADPanelMaxWidth = 430.0;
-// 面板高度缩放系数（宽保持满宽/430 封顶）。可在 Core/Makefile 用
-// -DAD_PANEL_HEIGHT_REDUCTION=... 调整，不必改源码。1.0 = 初版高度（约 290）。
-#ifndef AD_PANEL_HEIGHT_REDUCTION
-#define AD_PANEL_HEIGHT_REDUCTION (1.0)
-#endif
-static CGFloat const kADPanelHeightReduction = AD_PANEL_HEIGHT_REDUCTION;
 static CGFloat const kADPanelKeyboardMinHeight = 120.0;
-static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
+// 面板固定高度 200：竖屏单行显示，与横屏一致。
 static CGFloat const kADPanelMinHeight = 200.0;
 static CGFloat const kADPanelShadowOpacity = 0.28;
 static CGFloat const kADPanelShadowRadius = 8.0;
@@ -323,9 +317,9 @@ static void ADQueryDiag(NSString *line) {
     CGFloat cardWidth = MIN(width - kADPanelSideInset * 2.0, kADPanelMaxWidth);
     CGFloat originX = floor((width - cardWidth) / 2.0);
 
-    CGFloat preferredHeight = floor((height - safeArea.top) * ADPrefPanelHeightPercent() *
-                                    kADPanelHeightScale * kADPanelHeightReduction);
-    preferredHeight = MAX(preferredHeight, kADPanelMinHeight);
+    // 面板高度固定 200：竖屏单行显示、与横屏一致；不再按屏幕高度/偏好百分比推算。
+    // 键盘避让仍只受下方「键盘顶边约束」一条规则限制，不做任何横竖屏分支。
+    CGFloat preferredHeight = kADPanelMinHeight;
 
     // 只有一条几何约束：卡片底边不许越过键盘顶边。竖屏键盘矮 → 卡片停在偏好位置；
     // 横屏键盘高 → 这一条会同时把卡片往上推、把高度压小。没有任何横竖屏分支。
