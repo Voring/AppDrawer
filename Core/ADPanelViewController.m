@@ -56,6 +56,10 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     _searchBar.returnKeyType = UIReturnKeyDone;
     _searchBar.backgroundImage = [[UIImage alloc] init];
     _searchBar.backgroundColor = [UIColor clearColor];
+    _searchBar.searchTextField.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    _searchBar.searchTextField.textColor = [UIColor labelColor];
+    _searchBar.searchTextField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _searchBar.searchTextField.enablesReturnKeyAutomatically = NO;
     [_cardView addSubview:_searchBar];
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
@@ -83,6 +87,14 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     [_cardView addSubview:_emptyLabel];
 
     [self applyFilter];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+
+    // 面板是搜索型 UI：一出来就给键盘，同时也验证 window 是否真的拿到了 key。
+    [self.view.window makeKeyWindow];
+    [self focusSearchField];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -128,6 +140,20 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
                                            width,
                                            cardHeight - listTop - 6.0);
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
+}
+
+#pragma mark - 输入框
+
+- (void)focusSearchField {
+    if (!self.searchBar.window) {
+        return;
+    }
+    [self.searchBar.searchTextField becomeFirstResponder];
+    [self.searchBar setShowsCancelButton:YES animated:NO];
+}
+
+- (BOOL)isSearchFieldFirstResponder {
+    return self.searchBar.searchTextField.isFirstResponder;
 }
 
 #pragma mark - 数据
@@ -209,6 +235,8 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 }
 
 - (void)animateOutWithCompletion:(void (^)(void))completion {
+    [self.view endEditing:YES];
+
     [UIView animateWithDuration:0.20
         delay:0.0
         options:UIViewAnimationOptionCurveEaseIn
@@ -237,6 +265,8 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 #pragma mark - UISearchBarDelegate
 
 - (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
+    // SpringBoard 会不时把自己的主窗口抢回 key window，这里再抢一次保证键盘有落点。
+    [self.view.window makeKeyWindow];
     [searchBar setShowsCancelButton:YES animated:YES];
 }
 

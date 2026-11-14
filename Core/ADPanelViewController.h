@@ -10,6 +10,10 @@
 - (void)setApplications:(NSArray<ADAppInfo *> *)applications;
 - (void)setQuery:(NSString *)query;
 
+// 把键盘叫到搜索框上（同时也能看出 window 是否真的拿到了 key）。
+- (void)focusSearchField;
+- (BOOL)isSearchFieldFirstResponder;
+
 - (void)animateIn;
 - (void)animateOutWithCompletion:(void (^)(void))completion;
 
