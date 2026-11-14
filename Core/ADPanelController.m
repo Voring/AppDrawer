@@ -1,6 +1,7 @@
 #import "ADPanelController.h"
 
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #import "../Shared/URLScheme/ADURLScheme.h"
 #import "ADAppCatalog.h"
@@ -13,20 +14,192 @@
 // 1.0.2 嵌进 SpringBoard key window 的那次导致主线程卡死 + 覆盖层永久残留，
 // 不能再走。
 //
-// 1.1.8：层级降到 998（Kayoko 用的就是 998，只比状态栏 999 低 1）。
-// 之前一直挂在 10000001，比 SpringBoard 的键盘窗口（level=20）高得多，
-// 键盘就算被 medusa 呈现也会被我们的全屏窗口压住，看起来就是「没弹出来」。
-@interface ADPanelWindow : UIWindow
+// 1.1.9：窗口优先创建成 SpringBoard 的 SBWindow 实例（SBTransientOverlayWindow >
+// SBWindow > SBFWindow > 裸 UIWindow 依次尝试），并把每一步的结果写进 diag。
+// 原因：1.1.7 尝试过 SBWindow，但真机日志显示最后回落成裸 UIWindow，
+// 而失败原因只 NSLog 到了系统日志、没进 diag，等于白试一次。
+// 注意：仍然是「我们自己新建一个窗口实例」，不是把面板塞进 SpringBoard 现有
+// 的 key window。
+static NSString *const ADPanelTraitsRole = @"SBTraitsParticipantRoleTransientOverlay";
+static NSString *const ADPanelDebugName = @"AppDrawerPanel";
+
+static void ADAppendDiagLine(NSString *line);
+
+// 窗口创建过程的诊断记录，创建完成后一次性写进 diag。
+static NSMutableString *ADWindowDiagLog(void) {
+    static NSMutableString *log;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      log = [NSMutableString string];
+    });
+    return log;
+}
+
+@interface ADPanelPlainWindow : UIWindow
 @end
 
-@implementation ADPanelWindow
-
+@implementation ADPanelPlainWindow
 - (BOOL)canBecomeKeyWindow {
     return YES;
 }
-
 @end
 
+static BOOL ADWindowCanBecomeKeyIMP(id self, SEL _cmd) {
+    return YES;
+}
+
+// 运行时在目标基类之上注册我们自己的 ADPanelWindow 子类。
+static Class ADPanelWindowClassForBase(Class base) {
+    static NSMutableDictionary<NSString *, id> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      cache = [NSMutableDictionary dictionary];
+    });
+    if (!base) {
+        return Nil;
+    }
+    NSString *key = NSStringFromClass(base);
+    id cached = cache[key];
+    if (cached) {
+        return [cached isKindOfClass:[NSNull class]] ? Nil : cached;
+    }
+    static NSUInteger serial = 0;
+    NSString *name = [NSString stringWithFormat:@"ADPanelWindow_%lu", (unsigned long)++serial];
+    Class cls = objc_allocateClassPair(base, name.UTF8String, 0);
+    if (!cls) {
+        cache[key] = [NSNull null];
+        return Nil;
+    }
+    class_addMethod(cls, @selector(canBecomeKeyWindow), (IMP)ADWindowCanBecomeKeyIMP, "B@:");
+    class_addMethod(cls, @selector(_canBecomeKeyWindow), (IMP)ADWindowCanBecomeKeyIMP, "B@:");
+    objc_registerClassPair(cls);
+    cache[key] = cls;
+    return cls;
+}
+
+// 私有签名在 SDK 里没有声明，用 NSInvocation 统一调用，任何异常都不外泄。
+static id ADInvokeInit(Class cls, SEL sel, NSArray *arguments, NSString **errorOut) {
+    NSMethodSignature *signature = [cls instanceMethodSignatureForSelector:sel];
+    if (!signature) {
+        if (errorOut) {
+            *errorOut = @"no such initializer";
+        }
+        return nil;
+    }
+    if (signature.numberOfArguments != arguments.count + 2) {
+        if (errorOut) {
+            *errorOut = [NSString stringWithFormat:@"arity %lu", (unsigned long)signature.numberOfArguments];
+        }
+        return nil;
+    }
+    id target = [cls alloc];
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.target = target;
+    invocation.selector = sel;
+    for (NSUInteger index = 0; index < arguments.count; index++) {
+        id value = arguments[index];
+        [invocation setArgument:&value atIndex:(NSInteger)(index + 2)];
+    }
+    @try {
+        [invocation invoke];
+    } @catch (NSException *exception) {
+        if (errorOut) {
+            *errorOut = exception.reason ?: exception.name;
+        }
+        return nil;
+    }
+    __unsafe_unretained id result = nil;
+    [invocation getReturnValue:&result];
+    return result;
+}
+
+static id ADLayoutStrategyForClass(Class cls) {
+    SEL sel = NSSelectorFromString(@"defaultLayoutStrategy");
+    if (!cls || ![cls respondsToSelector:sel]) {
+        return nil;
+    }
+    @try {
+        NSMethodSignature *signature = [cls methodSignatureForSelector:sel];
+        if (!signature) {
+            return nil;
+        }
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = cls;
+        invocation.selector = sel;
+        [invocation invoke];
+        __unsafe_unretained id result = nil;
+        [invocation getReturnValue:&result];
+        return result;
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+static UIWindow *ADCreatePanelWindow(UIWindowScene *scene, UIViewController *controller) {
+    NSMutableString *log = ADWindowDiagLog();
+    [log setString:@""];
+
+    NSString *layoutSelName = @"initWithWindowScene:rootViewController:layoutStrategy:role:debugName:";
+    NSString *roleSelName = @"initWithWindowScene:rootViewController:role:debugName:";
+    NSString *plainSelName = @"initWithWindowScene:rootViewController:";
+
+    // SBFWindow 在 SpringBoardFoundation 里，是 SBWindow 的父类，一并兜底。
+    NSArray<NSString *> *baseNames = @[ @"SBTransientOverlayWindow", @"SBWindow", @"SBFWindow" ];
+    NSArray<NSString *> *roleValues = @[ ADPanelTraitsRole, @"" ];
+
+    for (NSString *baseName in baseNames) {
+        Class base = NSClassFromString(baseName);
+        [log appendFormat:@"%@=%@;", baseName, base ? @"yes" : @"no"];
+        if (!base || ![base isSubclassOfClass:[UIWindow class]]) {
+            continue;
+        }
+        Class cls = ADPanelWindowClassForBase(base);
+        [log appendFormat:@"pair(%@)=%@;", baseName, cls ? NSStringFromClass(cls) : @"nil"];
+        if (!cls) {
+            continue;
+        }
+
+        for (NSString *role in roleValues) {
+            NSString *label = [NSString stringWithFormat:@"%@/role=%@", baseName, role.length ? role : @"nil"];
+
+            NSString *error = nil;
+            id window = ADInvokeInit(cls,
+                                     NSSelectorFromString(layoutSelName),
+                                     @[
+                                        scene, controller, ADLayoutStrategyForClass(cls) ?: [NSNull null],
+                                        role, ADPanelDebugName
+                                     ],
+                                     &error);
+            if ([window isKindOfClass:[UIWindow class]]) {
+                [log appendFormat:@"%@ layout->OK;", label];
+                return (UIWindow *)window;
+            }
+            [log appendFormat:@"%@ layout->%@;", label, error ?: @"nil"];
+
+            error = nil;
+            window = ADInvokeInit(cls,
+                                  NSSelectorFromString(roleSelName),
+                                  @[ scene, controller, role, ADPanelDebugName ],
+                                  &error);
+            if ([window isKindOfClass:[UIWindow class]]) {
+                [log appendFormat:@"%@ role->OK;", label];
+                return (UIWindow *)window;
+            }
+            [log appendFormat:@"%@ role->%@;", label, error ?: @"nil"];
+        }
+
+        NSString *error = nil;
+        id window = ADInvokeInit(cls, NSSelectorFromString(plainSelName), @[ scene, controller ], &error);
+        if ([window isKindOfClass:[UIWindow class]]) {
+            [log appendFormat:@"%@ plain->OK;", baseName];
+            return (UIWindow *)window;
+        }
+        [log appendFormat:@"%@ plain->%@;", baseName, error ?: @"nil"];
+    }
+
+    [log appendString:@"fallback=plainUIWindow;"];
+    return [[ADPanelPlainWindow alloc] initWithWindowScene:scene];
+}
 
 #pragma mark - 工具
 
@@ -76,7 +249,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
 @implementation ADPanelController {
     ADPanelViewController *_panel;
-    ADPanelWindow *_window;
+    UIWindow *_window;
     BOOL _visible;
     // 收起动画的「代次」：每次 show/hide 都自增，过期的延时清理直接作废。
     NSUInteger _teardownToken;
@@ -173,11 +346,17 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       [weakSelf openApplication:bundleIdentifier];
     };
 
-    _window = [[ADPanelWindow alloc] initWithWindowScene:scene];
+    NSMutableString *windowLog = ADWindowDiagLog();
+    [windowLog setString:@""];
+    _window = ADCreatePanelWindow(scene, _panel);
+    ADAppendDiagLine([NSString stringWithFormat:@"[%@] stage=window class=%@ attempts=%@",
+                                                [NSDate date], NSStringFromClass([_window class]),
+                                                windowLog]);
     // 取当前方向的场景坐标：横竖屏在唤醒时判定一次，之后不做实时跟随。
     _window.frame = scene.coordinateSpace.bounds;
-    // 998：和 Kayoko 一致，比状态栏（999）低 1，避免把系统键盘压在自己下面。
-    _window.windowLevel = 998.0;
+    // 1.0.7（键盘验收可用版本）就是这个层级；1.1.8 试过 998，日志显示键盘窗口
+    // 反而彻底不出现，层级不是原因，回到基准值。
+    _window.windowLevel = 10000001.0;
     _window.backgroundColor = [UIColor clearColor];
     _window.opaque = NO;
     _window.rootViewController = _panel;
@@ -363,6 +542,26 @@ static NSString *ADWindowSummary(UIWindowScene *scene, UIWindow *panelWindow) {
     return nil;
 }
 
+// 往 diag.txt 追加一行原始文本（超过 64KB 清空重写）。
+static void ADAppendDiagLine(NSString *line) {
+    NSString *directory = ADRequestDirectoryPath();
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:NULL];
+    NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
+    NSDictionary *attributes =
+        [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    if ([attributes fileSize] > 64 * 1024) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+    }
+    NSString *existing = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL] ?: @"";
+    NSString *updated = [existing stringByAppendingFormat:@"%@\n", line];
+    [updated writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
 - (void)_logStage:(NSString *)stage {
     @autoreleasepool {
         UIWindowScene *scene = _window.windowScene;
@@ -411,22 +610,7 @@ static NSString *ADWindowSummary(UIWindowScene *scene, UIWindow *panelWindow) {
             ADWindowSummary(scene, _window),
             searchFieldInfo];
 
-        NSString *directory = ADRequestDirectoryPath();
-        [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:NULL];
-        NSString *path = [directory stringByAppendingPathComponent:@"diag.txt"];
-        NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path
-                                                                                   error:NULL];
-        if ([attributes fileSize] > 64 * 1024) {
-            [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-        }
-        NSString *existing = [NSString stringWithContentsOfFile:path
-                                                       encoding:NSUTF8StringEncoding
-                                                          error:NULL] ?: @"";
-        NSString *updated = [existing stringByAppendingFormat:@"%@\n", line];
-        [updated writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        ADAppendDiagLine(line);
     }
 }
 
