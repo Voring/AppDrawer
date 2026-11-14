@@ -151,6 +151,9 @@ static BOOL ADProxyIsHidden(id proxy) {
             ADCachedApplications = applications;
         }
     }
+    // 列表到手后立刻在后台预热图标：面板唤出时 cell 直接命中缓存，
+    // 不会先画占位图再跳真图标（那正是「闪一下」的一部分）。
+    [ADAppInfo preloadIconsForApplications:applications];
     return applications;
 }
 

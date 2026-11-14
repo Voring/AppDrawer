@@ -70,6 +70,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     ADPanelViewController *_panel;
     ADPanelWindow *_window;
     BOOL _visible;
+    // 收起动画的「代次」：每次 show/hide 都自增，过期的延时清理直接作废。
+    NSUInteger _teardownToken;
 }
 
 + (instancetype)sharedController {
@@ -187,8 +189,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
                          }
                          [strongSelf->_window makeKeyWindow];
                          [strongSelf->_panel focusSearchField];
-                         [strongSelf _writeDiagnostics:[NSString stringWithFormat:
-                                                                  @"retry-%@s", number]];
+                         [strongSelf _writeDiagnostics:[NSString stringWithFormat:@"retry-%@s", number]];
                        });
     }
 }
@@ -199,7 +200,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     }
     // 先把覆盖层无条件摘掉，再隔一个 runloop 发跳转；
     // ScreenCore 建浮窗场景不能和「面板收起」挤在同一帧。
-    [self hidePanel];
+    // 这条路径不做收起动画：动画期间残留的窗口会干扰 SC 建浮窗。
+    [self _teardownPanelSynchronously];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
                      ADOpenApplication(bundleIdentifier);
@@ -218,16 +220,36 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
         return;
     }
 
-    [self _teardownPanelSynchronously];
-
-    if (completion) {
-        completion();
+    if (!_visible || !_panel) {
+        [self _teardownPanelSynchronously];
+        if (completion) {
+            completion();
+        }
+        return;
     }
+
+    // Kayoko 式收起：0.33s 淡出，没有位移。
+    // 但清理绝不依赖动画 completion —— 用代次 + 延时兜底同步摘除，
+    // 即使主线程被打断，覆盖层也一定在 0.34s 内消失。
+    [_panel animateOutWithCompletion:nil];
+
+    NSUInteger token = ++_teardownToken;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.34 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     if (token != _teardownToken) {
+                         return;
+                     }
+                     [self _teardownPanelSynchronously];
+                     if (completion) {
+                         completion();
+                     }
+                   });
 }
 
 // 同步、幂等地把面板从事件链和窗口上摘掉。
 // 关键：清理动作不挂在动画 completion 上，主线程被卡住时也能保证覆盖层移除。
 - (void)_teardownPanelSynchronously {
+    _teardownToken++;
     if (_panel) {
         [_panel.view endEditing:YES];
         [_panel.view removeFromSuperview];
@@ -243,9 +265,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 }
 
 - (void)_handleForegroundLoss:(NSNotification *)notification {
-    // 锁屏、切后台、场景断开时无条件摘掉面板，不允许它浮在所有界面之上。
+    // 锁屏、切后台、场景断开时无条件、同步摘掉面板，不允许它浮在所有界面之上。
     if (_visible) {
-        [self hidePanel];
+        [self _teardownPanelSynchronously];
     }
 }
 
