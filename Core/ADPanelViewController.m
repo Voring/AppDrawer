@@ -16,9 +16,12 @@ static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
 static CGFloat const kADPanelTopOffset = 40.0;
 static CGFloat const kADPanelMaxWidth = 430.0;
-// 面板高度缩放系数（宽保持满宽/430 封顶）。2/3 是缩小 1/3；8/9 = 2/3 × 4/3，
-// 即在缩小 1/3 的基础上再抬高 1/3。只有一个系数，横竖屏不分开。
-static CGFloat const kADPanelHeightReduction = 8.0 / 9.0;
+// 面板高度缩放系数（宽保持满宽/430 封顶）。可在 Core/Makefile 用
+// -DAD_PANEL_HEIGHT_REDUCTION=... 调整，不必改源码。1.0 = 初版高度（约 290）。
+#ifndef AD_PANEL_HEIGHT_REDUCTION
+#define AD_PANEL_HEIGHT_REDUCTION (1.0)
+#endif
+static CGFloat const kADPanelHeightReduction = AD_PANEL_HEIGHT_REDUCTION;
 static CGFloat const kADPanelKeyboardMinHeight = 120.0;
 static CGFloat const kADPanelHeightScale = 2.0 / 3.0;
 static CGFloat const kADPanelMinHeight = 160.0;

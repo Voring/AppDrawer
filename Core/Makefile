@@ -13,6 +13,8 @@ AppDrawer_FILES += ../Shared/URLScheme/ADURLScheme.m
 
 AppDrawer_CFLAGS := -fobjc-arc
 AppDrawer_CFLAGS += -I../Shared/URLScheme
+# 面板高度系数：1.0 = 初版高度；0.889 = 初版再抬高 1/3；0.667 = 缩小 1/3。
+AppDrawer_CFLAGS += -DAD_PANEL_HEIGHT_REDUCTION=1.0
 
 AppDrawer_FRAMEWORKS := UIKit
 AppDrawer_FRAMEWORKS += CoreGraphics
