@@ -21,6 +21,12 @@ static CGFloat const kADGrabberWidth = 42.0;
 static CGFloat const kADGrabberHeight = 14.0;
 static CGFloat const kADGrabberLineWidth = 5.0;
 static CGFloat const kADGrabberTop = 6.0;
+// 竖屏面板高度在偏好值（默认 55%）基础上再缩到 1/3（约屏幕的 18%）。
+static CGFloat const kADPanelHeightScale = 1.0 / 3.0;
+static CGFloat const kADPanelPortraitMinHeight = 170.0;
+// 横屏：宽度取屏幕 1/2，居中；高度沿用偏好值。
+static CGFloat const kADPanelLandscapeWidthFraction = 0.5;
+static CGFloat const kADPanelLandscapeMinHeight = 220.0;
 // 展开/收起：0.33s，弹簧阻尼 1，easeOut；展开位移为自身高度的 1/3。
 static NSTimeInterval const kADPanelAnimationDuration = 0.33;
 // 上推收起：100pt 内渐进淡出，速度超过 900 直接收。
@@ -285,6 +291,39 @@ static CGFloat const kADFastDismissVelocity = 900.0;
 
 #pragma mark - 布局
 
+- (BOOL)isLandscapeInterface {
+    UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
+    if (@available(iOS 13.0, *)) {
+        UIWindowScene *scene = self.view.window.windowScene;
+        if (scene) {
+            orientation = scene.interfaceOrientation;
+        }
+    }
+    if (orientation == UIInterfaceOrientationUnknown) {
+        // 16.5 SDK 上 statusBarOrientation 已 deprecated，这里改用窗口尺寸判断。
+        CGSize screenSize = self.view.window.bounds.size;
+        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
+            screenSize = [UIScreen mainScreen].bounds.size;
+        }
+        return screenSize.width > screenSize.height;
+    }
+    return UIInterfaceOrientationIsLandscape(orientation);
+}
+
+// 收起手势的方向系数：竖屏向上推（负），横屏向下拉（正）。
+- (CGFloat)panDismissSign {
+    return [self isLandscapeInterface] ? 1.0 : -1.0;
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak typeof(self) weakSelf = self;
+    [coordinator animateAlongsideTransition:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+      [weakSelf layoutPanel];
+    } completion:nil];
+}
+
 - (void)layoutPanel {
     CGFloat width = CGRectGetWidth(self.view.bounds);
     CGFloat height = CGRectGetHeight(self.view.bounds);
@@ -292,15 +331,35 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         return;
     }
 
+    BOOL landscape = [self isLandscapeInterface];
     CGFloat topInset = MAX(self.view.safeAreaInsets.top, 20.0);
-    CGFloat cardWidth = width - kADPanelHorizontalInset * 2.0;
-    CGFloat cardHeight = floor((height - topInset) * ADPrefPanelHeightPercent());
-    cardHeight = MAX(cardHeight, 320.0);
-    cardHeight = MIN(cardHeight, height - topInset - kADPanelVerticalGap);
+
+    CGFloat cardWidth = 0.0;
+    CGFloat cardHeight = 0.0;
+    CGFloat originX = 0.0;
+    CGFloat originY = 0.0;
+
+    if (landscape) {
+        // 横屏：半宽、水平居中，交互条在上方。
+        cardWidth = floor(width * kADPanelLandscapeWidthFraction);
+        cardHeight = floor(height * ADPrefPanelHeightPercent());
+        cardHeight = MAX(cardHeight, kADPanelLandscapeMinHeight);
+        cardHeight = MIN(cardHeight, height - kADPanelVerticalGap * 2.0);
+        originX = floor((width - cardWidth) / 2.0);
+        originY = floor((height - cardHeight) / 2.0);
+    } else {
+        // 竖屏：贴顶，高度缩到偏好值的 1/3。
+        cardWidth = width - kADPanelHorizontalInset * 2.0;
+        cardHeight = floor((height - topInset) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
+        cardHeight = MAX(cardHeight, kADPanelPortraitMinHeight);
+        cardHeight = MIN(cardHeight, height - topInset - kADPanelVerticalGap);
+        originX = kADPanelHorizontalInset;
+        originY = topInset;
+    }
 
     self.dimView.frame = self.view.bounds;
 
-    self.cardView.frame = CGRectMake(kADPanelHorizontalInset, topInset, cardWidth, cardHeight);
+    self.cardView.frame = CGRectMake(originX, originY, cardWidth, cardHeight);
     CGFloat radius = [self resolvedCornerRadius];
     self.cardView.layer.cornerRadius = radius;
     self.cardView.layer.shadowPath =
@@ -315,29 +374,45 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     self.blurView.layer.cornerRadius = radius;
     self.materialTintView.frame = self.blurView.contentView.bounds;
 
-    // 面板在上半屏：交互元素全部贴底，列表在上方。
     CGFloat cardWidthActual = CGRectGetWidth(self.cardView.bounds);
     CGFloat cardHeightActual = CGRectGetHeight(self.cardView.bounds);
-
-    CGFloat grabberY = cardHeightActual - kADGrabberTop - kADGrabberHeight;
-    self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
-                                        grabberY,
-                                        kADGrabberWidth,
-                                        kADGrabberHeight);
-
     CGFloat horizontalInset = 8.0;
     CGFloat searchHeight = 48.0;
-    CGFloat searchY = grabberY - 2.0 - searchHeight;
-    self.searchBar.frame = CGRectMake(horizontalInset,
-                                      searchY,
-                                      cardWidthActual - horizontalInset * 2.0,
-                                      searchHeight);
 
-    CGFloat listTop = 8.0;
-    self.collectionView.frame = CGRectMake(0.0,
-                                           listTop,
-                                           cardWidthActual,
-                                           MAX(searchY - listTop, 0.0));
+    if (landscape) {
+        // 横屏：抓杆在上，搜索框紧随其后，列表在下方。
+        self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
+                                            kADGrabberTop,
+                                            kADGrabberWidth,
+                                            kADGrabberHeight);
+        CGFloat searchY = CGRectGetMaxY(self.grabberView.frame) + 2.0;
+        self.searchBar.frame = CGRectMake(horizontalInset,
+                                          searchY,
+                                          cardWidthActual - horizontalInset * 2.0,
+                                          searchHeight);
+        CGFloat listTop = CGRectGetMaxY(self.searchBar.frame);
+        self.collectionView.frame = CGRectMake(0.0,
+                                               listTop,
+                                               cardWidthActual,
+                                               MAX(cardHeightActual - listTop - 4.0, 0.0));
+    } else {
+        // 竖屏：交互元素全部贴底，列表在上方。
+        CGFloat grabberY = cardHeightActual - kADGrabberTop - kADGrabberHeight;
+        self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
+                                            grabberY,
+                                            kADGrabberWidth,
+                                            kADGrabberHeight);
+        CGFloat searchY = grabberY - 2.0 - searchHeight;
+        self.searchBar.frame = CGRectMake(horizontalInset,
+                                          searchY,
+                                          cardWidthActual - horizontalInset * 2.0,
+                                          searchHeight);
+        CGFloat listTop = 8.0;
+        self.collectionView.frame = CGRectMake(0.0,
+                                               listTop,
+                                               cardWidthActual,
+                                               MAX(searchY - listTop, 0.0));
+    }
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
 }
 
@@ -528,15 +603,16 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     if (recognizer.state == UIGestureRecognizerStateChanged) {
-        // 上半屏面板只接受「向上推」：translation.y 为负。
-        if (translation.y > 0.0 && !_panDidFadeOut) {
+        // 竖屏只接受上推（负），横屏只接受下拉（正）。
+        CGFloat sign = [self panDismissSign];
+        if (translation.y * sign < 0.0 && !_panDidFadeOut) {
             return;
         }
-        CGFloat fadeProgress = MIN(MAX(-translation.y / kADFadeOutDistance, 0.0), 1.0);
+        CGFloat fadeProgress = MIN(MAX(translation.y * sign / kADFadeOutDistance, 0.0), 1.0);
         if (_panDidFadeOut || fadeProgress >= 1.0) {
             _panDidFadeOut = YES;
             fadeProgress = 1.0;
-            translation.y = MIN(translation.y, -kADFadeOutDistance);
+            translation.y = sign * kADFadeOutDistance;
         }
         [UIView animateWithDuration:0.1
                               delay:0.0
@@ -560,8 +636,9 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         return;
     }
 
+    CGFloat sign = [self panDismissSign];
     BOOL fastDismiss = (recognizer.state == UIGestureRecognizerStateEnded) && !_panDidFadeOut &&
-                       translation.y < 0.0 && velocity.y <= -kADFastDismissVelocity;
+                       translation.y * sign > 0.0 && velocity.y * sign >= kADFastDismissVelocity;
     if (_panDidFadeOut || fastDismiss) {
         if (self.onRequestClose) {
             self.onRequestClose();
@@ -595,15 +672,19 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     }
 
     CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.cardView];
-    // 只接管向上滑动（translation/velocity 为负）。
-    if (velocity.y >= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
+    CGFloat sign = [self panDismissSign];
+    if (velocity.y * sign <= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
         return NO;
     }
 
-    // 列表还能向下滚时，上推优先给列表；滚到底了才接管为收起手势。
+    // 列表还有滚动余量时，拖动优先给列表；到达边界才接管为收起手势。
     CGPoint location = [gestureRecognizer locationInView:self.cardView];
     if (CGRectContainsPoint(self.collectionView.frame, location)) {
         UIEdgeInsets insets = self.collectionView.adjustedContentInset;
+        if ([self isLandscapeInterface]) {
+            // 横屏下拉：列表回到顶部才收。
+            return self.collectionView.contentOffset.y <= -insets.top + 0.5;
+        }
         CGFloat bottomBoundary =
             self.collectionView.contentSize.height - CGRectGetHeight(self.collectionView.bounds) +
             insets.bottom;
