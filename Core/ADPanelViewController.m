@@ -319,6 +319,16 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     return [self isLandscapeInterface] ? 1.0 : -1.0;
 }
 
+// 单行网格高度（图标 + 名字），用于把面板整体下移一格。
+- (CGFloat)gridRowHeightForWidth:(CGFloat)width {
+    NSInteger columns = ADPrefColumns();
+    CGFloat horizontalInsets = 32.0;
+    CGFloat spacing = (CGFloat)(columns - 1) * 4.0;
+    CGFloat itemWidth = floor((width - horizontalInsets - spacing) / (CGFloat)columns);
+    CGFloat iconSide = MIN(floor(itemWidth * 0.82), 62.0);
+    return iconSide + 34.0;
+}
+
 - (void)layoutPanel {
     CGFloat width = CGRectGetWidth(self.view.bounds);
     CGFloat height = CGRectGetHeight(self.view.bounds);
@@ -343,13 +353,13 @@ static CGFloat const kADFastDismissVelocity = 900.0;
         originX = floor((width - cardWidth) / 2.0);
         originY = kADPanelLandscapeTopGap;
     } else {
-        // 竖屏：贴顶，高度缩到偏好值的 2/3。
+        // 竖屏：整体下移一格（正好一个图标格的高度，和网格行高保持一致）。
         cardWidth = width - kADPanelHorizontalInset * 2.0;
         cardHeight = floor((height - topInset) * ADPrefPanelHeightPercent() * kADPanelHeightScale);
         cardHeight = MAX(cardHeight, kADPanelPortraitMinHeight);
         cardHeight = MIN(cardHeight, height - topInset - kADPanelVerticalGap);
         originX = kADPanelHorizontalInset;
-        originY = topInset;
+        originY = topInset + [self gridRowHeightForWidth:cardWidth];
     }
 
     self.dimView.frame = self.view.bounds;
