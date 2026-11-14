@@ -8,18 +8,90 @@
 
 static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 
+// —— 以下视觉/动效参数与 Voring/Kayoko-1 的 Core/Presentation + Core/Views 对齐 ——
+// 面板：悬浮卡片，四角连续圆角（半径取自屏幕 displayCornerRadius - 3），阴影 0.28。
+static CGFloat const kADPanelHorizontalInset = 8.0;
+static CGFloat const kADPanelVerticalGap = 8.0;
+static CGFloat const kADPanelShadowOpacity = 0.28;
+static CGFloat const kADPanelShadowRadius = 8.0;
+static CGFloat const kADPanelCornerRadiusMin = 28.0;
+static CGFloat const kADPanelCornerRadiusMax = 54.0;
+// 抓杆：42 x 14，线宽 5，labelColor 22% 透明度。
+static CGFloat const kADGrabberWidth = 42.0;
+static CGFloat const kADGrabberHeight = 14.0;
+static CGFloat const kADGrabberLineWidth = 5.0;
+static CGFloat const kADGrabberTop = 6.0;
+// 展开/收起：0.33s，弹簧阻尼 1，easeOut；展开位移为自身高度的 1/3。
+static NSTimeInterval const kADPanelAnimationDuration = 0.33;
+// 下拉收起：100pt 内渐进淡出，速度超过 900 直接收。
+static CGFloat const kADFadeOutDistance = 100.0;
+static CGFloat const kADFastDismissVelocity = 900.0;
+
+@interface ADGrabberView : UIView
+@property (nonatomic, strong) CAShapeLayer *lineLayer;
+@end
+
+@implementation ADGrabberView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _lineLayer = [CAShapeLayer layer];
+        _lineLayer.lineWidth = kADGrabberLineWidth;
+        _lineLayer.lineCap = kCALineCapRound;
+        _lineLayer.lineJoin = kCALineJoinRound;
+        _lineLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.22].CGColor;
+        [self.layer addSublayer:_lineLayer];
+        self.contentMode = UIViewContentModeRedraw;
+        self.backgroundColor = [UIColor clearColor];
+    }
+    return self;
+}
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(kADGrabberWidth, kADGrabberHeight);
+}
+
+// 抓杆本身只有 42x14，但可点区域按 Kayoko 的 CGRectInset(-44, -16) 放大。
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    return CGRectContainsPoint(CGRectInset(self.bounds, -44.0, -16.0), point);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    _lineLayer.frame = self.bounds;
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    CGPoint start = CGPointMake(2.0, CGRectGetMidY(self.bounds));
+    CGPoint end = CGPointMake(CGRectGetWidth(self.bounds) - 2.0, CGRectGetMidY(self.bounds));
+    [path moveToPoint:start];
+    [path addLineToPoint:end];
+    _lineLayer.path = path.CGPath;
+    _lineLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.22].CGColor;
+}
+
+@end
+
 @interface ADPanelViewController () <UISearchBarDelegate, UICollectionViewDataSource,
-                                     UICollectionViewDelegateFlowLayout>
+                                     UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate>
 
 @property (nonatomic, strong) UIView *dimView;
+// 承载阴影的透明外壳；真正的裁剪在 chromeClipView 上（阴影与裁剪必须分层）。
 @property (nonatomic, strong) UIView *cardView;
+@property (nonatomic, strong) UIView *chromeClipView;
 @property (nonatomic, strong) UIVisualEffectView *blurView;
+@property (nonatomic, strong) UIView *materialTintView;
+@property (nonatomic, strong) ADGrabberView *grabberView;
 @property (nonatomic, strong) UISearchBar *searchBar;
 @property (nonatomic, strong) UICollectionView *collectionView;
 @property (nonatomic, strong) UILabel *emptyLabel;
 
+@property (nonatomic, strong) UIPanGestureRecognizer *panGestureRecognizer;
+@property (nonatomic, assign) BOOL panDidFadeOut;
+@property (nonatomic, assign, getter=isAnimating) BOOL animating;
+
 @property (nonatomic, copy) NSArray<ADAppInfo *> *allApplications;
 @property (nonatomic, copy) NSArray<ADAppInfo *> *filteredApplications;
+@property (nonatomic, copy) NSString *lastAppliedQuery;
 
 @end
 
@@ -33,19 +105,50 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     self.view.backgroundColor = [UIColor clearColor];
 
     _dimView = [[UIView alloc] init];
-    _dimView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    _dimView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.30];
     [_dimView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
                                                                           action:@selector(handleBackgroundTap)]];
     [self.view addSubview:_dimView];
 
     _cardView = [[UIView alloc] init];
-    _cardView.clipsToBounds = YES;
+    _cardView.backgroundColor = [UIColor clearColor];
+    _cardView.opaque = NO;
+    _cardView.clipsToBounds = NO;
     _cardView.layer.cornerCurve = kCACornerCurveContinuous;
-    _cardView.layer.maskedCorners = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+    _cardView.layer.shadowColor = [UIColor blackColor].CGColor;
+    _cardView.layer.shadowOffset = CGSizeMake(0.0, 1.0);
+    _cardView.layer.shadowRadius = kADPanelShadowRadius;
+    _cardView.layer.shadowOpacity = kADPanelShadowOpacity;
     [self.view addSubview:_cardView];
 
-    _blurView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:ADPrefBlurStyle()]];
-    [_cardView addSubview:_blurView];
+    _chromeClipView = [[UIView alloc] init];
+    _chromeClipView.backgroundColor = [UIColor clearColor];
+    _chromeClipView.opaque = NO;
+    _chromeClipView.clipsToBounds = YES;
+    _chromeClipView.layer.cornerCurve = kCACornerCurveContinuous;
+    [_cardView addSubview:_chromeClipView];
+
+    _blurView = [[UIVisualEffectView alloc] initWithEffect:[self preferredBlurEffect]];
+    _blurView.backgroundColor = [UIColor clearColor];
+    _blurView.opaque = NO;
+    _blurView.contentView.backgroundColor = [UIColor clearColor];
+    _blurView.contentView.opaque = NO;
+    _blurView.layer.masksToBounds = YES;
+    _blurView.layer.cornerCurve = kCACornerCurveContinuous;
+    [_chromeClipView addSubview:_blurView];
+
+    _materialTintView = [[UIView alloc] init];
+    _materialTintView.userInteractionEnabled = NO;
+    _materialTintView.backgroundColor = [self preferredMaterialTintColor];
+    [_blurView.contentView addSubview:_materialTintView];
+
+    _grabberView = [[ADGrabberView alloc] initWithFrame:CGRectZero];
+    [_chromeClipView addSubview:_grabberView];
+    // 点抓杆 = 收起（Kayoko 的 grabber tap 行为）；手势挂在抓杆自己身上，
+    // 不能挂到卡片上，否则点列表格子会被这个 tap 吃掉。
+    UITapGestureRecognizer *grabberTap =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleGrabberTap)];
+    [_grabberView addGestureRecognizer:grabberTap];
 
     _searchBar = [[UISearchBar alloc] init];
     _searchBar.delegate = self;
@@ -60,7 +163,7 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     _searchBar.searchTextField.textColor = [UIColor labelColor];
     _searchBar.searchTextField.clearButtonMode = UITextFieldViewModeWhileEditing;
     _searchBar.searchTextField.enablesReturnKeyAutomatically = NO;
-    [_cardView addSubview:_searchBar];
+    [_chromeClipView addSubview:_searchBar];
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.minimumLineSpacing = 14.0;
@@ -76,7 +179,7 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     _collectionView.contentInset = UIEdgeInsetsMake(2.0, 0.0, 16.0, 0.0);
     [_collectionView registerClass:[ADAppCell class]
         forCellWithReuseIdentifier:ADAppCellReuseIdentifier];
-    [_cardView addSubview:_collectionView];
+    [_chromeClipView addSubview:_collectionView];
 
     _emptyLabel = [[UILabel alloc] init];
     _emptyLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightRegular];
@@ -84,9 +187,14 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     _emptyLabel.textAlignment = NSTextAlignmentCenter;
     _emptyLabel.numberOfLines = 0;
     _emptyLabel.text = @"正在读取已安装 App…";
-    [_cardView addSubview:_emptyLabel];
+    [_chromeClipView addSubview:_emptyLabel];
 
-    [self applyFilter];
+    _panGestureRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                    action:@selector(handlePanGesture:)];
+    _panGestureRecognizer.delegate = self;
+    [_cardView addGestureRecognizer:_panGestureRecognizer];
+
+    [self applyFilterResettingOffset:YES];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -107,6 +215,74 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     [self layoutPanel];
 }
 
+#pragma mark - 材质
+
+- (BOOL)prefersDarkMaterial {
+    if (@available(iOS 13.0, *)) {
+        if (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// 与 Kayoko 一致：SystemThinMaterial（而不是厚的 SystemMaterial），
+// 背后能透出一点壁纸，观感更轻。
+- (UIBlurEffect *)preferredBlurEffect {
+    NSInteger style = ADPrefBlurStyle();
+    if (style != UIBlurEffectStyleSystemMaterial) {
+        // 用户在偏好里显式指定了样式，尊重设置。
+        return [UIBlurEffect effectWithStyle:(UIBlurEffectStyle)style];
+    }
+    if (@available(iOS 13.0, *)) {
+        return [UIBlurEffect effectWithStyle:[self prefersDarkMaterial]
+                                                   ? UIBlurEffectStyleSystemThinMaterialDark
+                                                   : UIBlurEffectStyleSystemThinMaterialLight];
+    }
+    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleRegular];
+}
+
+- (UIColor *)preferredMaterialTintColor {
+    if ([self prefersDarkMaterial]) {
+        return [UIColor colorWithWhite:1.0 alpha:0.06];
+    }
+    return [UIColor colorWithWhite:1.0 alpha:0.34];
+}
+
+- (void)applyMaterialAppearance {
+    _blurView.effect = [self preferredBlurEffect];
+    _materialTintView.backgroundColor = [self preferredMaterialTintColor];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (@available(iOS 13.0, *)) {
+        if (previousTraitCollection &&
+            previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+            [self applyMaterialAppearance];
+        }
+    }
+    [self layoutPanel];
+}
+
+// 圆角按屏幕物理圆角推导：displayCornerRadius - 3，夹在 28...54 之间。
+- (CGFloat)resolvedCornerRadius {
+    CGFloat radius = ADPrefPanelCornerRadius();
+    UIScreen *screen = self.view.window.windowScene.screen ?: [UIScreen mainScreen];
+    @try {
+        NSNumber *value = [screen valueForKey:@"_displayCornerRadius"];
+        if (!value) {
+            value = [screen valueForKey:@"displayCornerRadius"];
+        }
+        if ([value respondsToSelector:@selector(doubleValue)]) {
+            radius = MAX(radius, [value doubleValue] - 3.0);
+        }
+    } @catch (__unused NSException *exception) {
+        // 取不到就退回偏好值。
+    }
+    return MAX(kADPanelCornerRadiusMin, MIN(kADPanelCornerRadiusMax, radius));
+}
+
 #pragma mark - 布局
 
 - (void)layoutPanel {
@@ -116,29 +292,47 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
         return;
     }
 
-    CGFloat cardHeight = floor(height * ADPrefPanelHeightPercent());
+    CGFloat topInset = MAX(self.view.safeAreaInsets.top, 20.0);
+    CGFloat cardWidth = width - kADPanelHorizontalInset * 2.0;
+    CGFloat cardHeight = floor((height - topInset) * ADPrefPanelHeightPercent());
     cardHeight = MAX(cardHeight, 320.0);
-    cardHeight = MIN(cardHeight, height - 56.0);
+    cardHeight = MIN(cardHeight, height - topInset - kADPanelVerticalGap);
 
     self.dimView.frame = self.view.bounds;
 
-    self.cardView.frame = CGRectMake(0.0, 0.0, width, cardHeight);
-    self.cardView.layer.cornerRadius = ADPrefPanelCornerRadius();
+    self.cardView.frame = CGRectMake(kADPanelHorizontalInset, topInset, cardWidth, cardHeight);
+    CGFloat radius = [self resolvedCornerRadius];
+    self.cardView.layer.cornerRadius = radius;
+    self.cardView.layer.shadowPath =
+        [UIBezierPath bezierPathWithRoundedRect:self.cardView.bounds cornerRadius:radius].CGPath;
 
-    self.blurView.frame = self.cardView.bounds;
+    self.chromeClipView.frame = self.cardView.bounds;
+    self.chromeClipView.layer.cornerRadius = radius;
+    self.chromeClipView.layer.maskedCorners =
+        kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
 
-    CGFloat topInset = MAX(self.view.safeAreaInsets.top, 20.0);
-    CGFloat horizontalInset = 12.0;
+    self.blurView.frame = self.chromeClipView.bounds;
+    self.blurView.layer.cornerRadius = radius;
+    self.materialTintView.frame = self.blurView.contentView.bounds;
+
+    CGFloat cardWidthActual = CGRectGetWidth(self.cardView.bounds);
+    self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
+                                        kADGrabberTop,
+                                        kADGrabberWidth,
+                                        kADGrabberHeight);
+
+    CGFloat horizontalInset = 8.0;
+    CGFloat searchTop = CGRectGetMaxY(self.grabberView.frame) + 2.0;
     self.searchBar.frame = CGRectMake(horizontalInset,
-                                      topInset + 2.0,
-                                      width - horizontalInset * 2.0,
+                                      searchTop,
+                                      cardWidthActual - horizontalInset * 2.0,
                                       48.0);
 
-    CGFloat listTop = CGRectGetMaxY(self.searchBar.frame) + 2.0;
+    CGFloat listTop = CGRectGetMaxY(self.searchBar.frame);
     self.collectionView.frame = CGRectMake(0.0,
                                            listTop,
-                                           width,
-                                           cardHeight - listTop - 6.0);
+                                           cardWidthActual,
+                                           CGRectGetHeight(self.cardView.bounds) - listTop - 4.0);
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
 }
 
@@ -159,13 +353,37 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 #pragma mark - 数据
 
 - (void)setApplications:(NSArray<ADAppInfo *> *)applications {
-    self.allApplications = applications ?: @[];
-    [self applyFilter];
+    NSArray<ADAppInfo *> *incoming = applications ?: @[];
+
+    // 内容没变就什么都不做：这是打开面板时列表「闪一下」的主要原因
+    // （后台重载回来的同一份列表触发了 reloadData 并重置了滚动位置）。
+    if ([self _applications:incoming equalTo:self.allApplications]) {
+        return;
+    }
+
+    self.allApplications = incoming;
+    [self applyFilterResettingOffset:NO];
+}
+
+- (BOOL)_applications:(NSArray<ADAppInfo *> *)lhs equalTo:(NSArray<ADAppInfo *> *)rhs {
+    if (lhs.count != rhs.count) {
+        return NO;
+    }
+    for (NSUInteger index = 0; index < lhs.count; index++) {
+        if (![lhs[index].bundleIdentifier isEqualToString:rhs[index].bundleIdentifier]) {
+            return NO;
+        }
+    }
+    return YES;
 }
 
 - (void)setQuery:(NSString *)query {
-    self.searchBar.text = query ?: @"";
-    [self applyFilter];
+    NSString *text = query ?: @"";
+    if ([self.searchBar.text isEqualToString:text]) {
+        return;
+    }
+    self.searchBar.text = text;
+    [self applyFilterResettingOffset:YES];
 }
 
 - (NSString *)_normalizedQuery {
@@ -176,7 +394,14 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 }
 
 - (void)applyFilter {
+    [self applyFilterResettingOffset:NO];
+}
+
+- (void)applyFilterResettingOffset:(BOOL)resetsOffset {
     NSString *query = [self _normalizedQuery];
+    BOOL queryChanged = !(self.lastAppliedQuery == nil ? (query.length == 0)
+                                                       : [self.lastAppliedQuery isEqualToString:query]);
+    self.lastAppliedQuery = query;
 
     if (query.length == 0) {
         self.filteredApplications = self.allApplications ?: @[];
@@ -206,9 +431,12 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
         self.emptyLabel.hidden = YES;
     }
 
-    if (self.filteredApplications.count > 0) {
-        [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.contentInset.top)
-                                      animated:NO];
+    // 只有搜索词真的变了才回到顶部，后台刷新不能把用户正在看的位置弹走。
+    if (resetsOffset || queryChanged) {
+        if (self.filteredApplications.count > 0) {
+            [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.contentInset.top)
+                                          animated:NO];
+        }
     }
 }
 
@@ -217,40 +445,52 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 - (void)animateIn {
     [self.view layoutIfNeeded];
 
-    self.dimView.alpha = 0.0;
-    self.cardView.alpha = 0.0;
-    self.cardView.transform = CGAffineTransformMakeTranslation(0.0, -CGRectGetHeight(self.cardView.bounds) * 0.22);
+    _cardView.transform = CGAffineTransformMakeTranslation(0.0,
+                                                           CGRectGetHeight(self.cardView.bounds) / 3.0);
+    _cardView.alpha = 0.0;
+    _dimView.alpha = 0.0;
 
-    [UIView animateWithDuration:0.42
+    _animating = YES;
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:kADPanelAnimationDuration
                           delay:0.0
-         usingSpringWithDamping:0.86
-          initialSpringVelocity:0.35
+         usingSpringWithDamping:1.0
+          initialSpringVelocity:0.0
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
-                       self.dimView.alpha = 1.0;
-                       self.cardView.alpha = 1.0;
-                       self.cardView.transform = CGAffineTransformIdentity;
+                       ADPanelViewController *strongSelf = weakSelf;
+                       strongSelf.cardView.transform = CGAffineTransformIdentity;
+                       strongSelf.cardView.alpha = 1.0;
+                       strongSelf.dimView.alpha = 1.0;
                      }
-                     completion:nil];
+                     completion:^(__unused BOOL finished) {
+                       weakSelf.animating = NO;
+                     }];
 }
 
 - (void)animateOutWithCompletion:(void (^)(void))completion {
     [self.view endEditing:YES];
 
-    [UIView animateWithDuration:0.20
-        delay:0.0
-        options:UIViewAnimationOptionCurveEaseIn
-        animations:^{
-          self.dimView.alpha = 0.0;
-          self.cardView.alpha = 0.0;
-          self.cardView.transform = CGAffineTransformMakeTranslation(0.0, -30.0);
-        }
-        completion:^(__unused BOOL finished) {
-          self.cardView.transform = CGAffineTransformIdentity;
-          if (completion) {
-              completion();
-          }
-        }];
+    _animating = YES;
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:kADPanelAnimationDuration
+                          delay:0.0
+         usingSpringWithDamping:1.0
+          initialSpringVelocity:0.0
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+                       ADPanelViewController *strongSelf = weakSelf;
+                       strongSelf.cardView.alpha = 0.0;
+                       strongSelf.dimView.alpha = 0.0;
+                     }
+                     completion:^(__unused BOOL finished) {
+                       ADPanelViewController *strongSelf = weakSelf;
+                       strongSelf.cardView.transform = CGAffineTransformIdentity;
+                       strongSelf.animating = NO;
+                       if (completion) {
+                           completion();
+                       }
+                     }];
 }
 
 #pragma mark - 交互
@@ -262,6 +502,107 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     }
 }
 
+- (void)handleGrabberTap {
+    if (self.isAnimating) {
+        return;
+    }
+    if (self.onRequestClose) {
+        self.onRequestClose();
+    }
+}
+
+- (void)handlePanGesture:(UIPanGestureRecognizer *)recognizer {
+    CGPoint translation = [recognizer translationInView:self.cardView];
+    CGPoint velocity = [recognizer velocityInView:self.cardView];
+
+    if (recognizer.state == UIGestureRecognizerStateBegan) {
+        _panDidFadeOut = NO;
+        _dimView.userInteractionEnabled = NO;
+        return;
+    }
+
+    if (recognizer.state == UIGestureRecognizerStateChanged) {
+        if (translation.y < 0.0 && !_panDidFadeOut) {
+            return;
+        }
+        CGFloat fadeProgress = MIN(MAX(translation.y / kADFadeOutDistance, 0.0), 1.0);
+        if (_panDidFadeOut || fadeProgress >= 1.0) {
+            _panDidFadeOut = YES;
+            fadeProgress = 1.0;
+            translation.y = MAX(translation.y, kADFadeOutDistance);
+        }
+        [UIView animateWithDuration:0.1
+                              delay:0.0
+             usingSpringWithDamping:0.7
+              initialSpringVelocity:0.0
+                            options:UIViewAnimationOptionCurveEaseOut |
+                                    UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+                           self.cardView.transform =
+                               CGAffineTransformMakeTranslation(0.0, translation.y);
+                           self.cardView.alpha = 1.0 - fadeProgress;
+                           self.dimView.alpha = 1.0 - fadeProgress;
+                         }
+                         completion:nil];
+        return;
+    }
+
+    if (recognizer.state != UIGestureRecognizerStateEnded &&
+        recognizer.state != UIGestureRecognizerStateCancelled &&
+        recognizer.state != UIGestureRecognizerStateFailed) {
+        return;
+    }
+
+    BOOL fastDismiss = (recognizer.state == UIGestureRecognizerStateEnded) && !_panDidFadeOut &&
+                       translation.y > 0.0 && velocity.y >= kADFastDismissVelocity;
+    if (_panDidFadeOut || fastDismiss) {
+        if (self.onRequestClose) {
+            self.onRequestClose();
+        }
+        return;
+    }
+
+    [UIView animateWithDuration:0.4
+                          delay:0.0
+         usingSpringWithDamping:1.0
+          initialSpringVelocity:0.0
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+                       self.cardView.transform = CGAffineTransformIdentity;
+                       self.cardView.alpha = 1.0;
+                       self.dimView.alpha = 1.0;
+                     }
+                     completion:^(__unused BOOL finished) {
+                       self.dimView.userInteractionEnabled = YES;
+                     }];
+}
+
+#pragma mark - UIGestureRecognizerDelegate
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer != self.panGestureRecognizer) {
+        return YES;
+    }
+    if (self.isAnimating) {
+        return NO;
+    }
+
+    CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.cardView];
+    if (velocity.y <= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
+        return NO;
+    }
+
+    // 列表已经滚走时，下拉优先给列表滚动，只有回到顶部才接管为收起手势。
+    CGPoint location = [gestureRecognizer locationInView:self.cardView];
+    if (CGRectContainsPoint(self.collectionView.frame, location)) {
+        CGFloat topBoundary = -self.collectionView.adjustedContentInset.top;
+        return self.collectionView.contentOffset.y <= topBoundary + 0.5 &&
+               self.collectionView.contentSize.height >
+                   CGRectGetHeight(self.collectionView.bounds);
+    }
+    return YES;
+}
+
 #pragma mark - UISearchBarDelegate
 
 - (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
@@ -271,7 +612,7 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
 }
 
 - (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
-    [self applyFilter];
+    [self applyFilterResettingOffset:YES];
 }
 
 - (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
@@ -282,7 +623,7 @@ static NSString *const ADAppCellReuseIdentifier = @"ADAppCell";
     searchBar.text = @"";
     [searchBar setShowsCancelButton:NO animated:YES];
     [searchBar resignFirstResponder];
-    [self applyFilter];
+    [self applyFilterResettingOffset:YES];
 }
 
 #pragma mark - UICollectionViewDataSource
