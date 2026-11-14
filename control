@@ -1,6 +1,6 @@
 Package: com.voring.appdrawer
 Name: AppDrawer
-Version: 1.0.7
+Version: 1.0.8
 Architecture: iphoneos-arm64e
 Description: 半屏 App 抽屉：URL scheme 唤起，顶部搜索框，点击应用交给 ScreenCore 以浮窗打开。
 Maintainer: Voring
