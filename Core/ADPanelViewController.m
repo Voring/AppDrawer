@@ -293,25 +293,72 @@ static CGFloat const kADFastDismissVelocity = 900.0;
     return MAX(kADPanelCornerRadiusMin, MIN(kADPanelCornerRadiusMax, radius));
 }
 
+#pragma mark - 方向
+
+// SpringBoard 自己的 windowScene 恒报竖屏（它不旋转自己，只旋转 App），
+// 所以判方向不能用 panel 窗口的 scene，也绝对不能只看窗口 bounds
+// （1.2.0 已实测：bounds 是基准方向尺寸、恒为 852x393，竖屏会被误判成横屏）。
+// 依次取：最前面那个 App 的窗口场景方向 -> 设备方向 -> 窗口 frame 的宽高比。
+static UIInterfaceOrientation ADFrontmostAppOrientation(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *candidate in [UIApplication sharedApplication].connectedScenes) {
+            if (![candidate isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+            UIWindowScene *scene = (UIWindowScene *)candidate;
+            if (scene.activationState != UISceneActivationStateForegroundActive) {
+                continue;
+            }
+            NSString *delegateName = NSStringFromClass([scene.delegate class]);
+            if ([delegateName containsString:@"SpringBoard"]) {
+                continue;
+            }
+            UIInterfaceOrientation orientation = scene.interfaceOrientation;
+            if (orientation != UIInterfaceOrientationUnknown) {
+                return orientation;
+            }
+        }
+    }
+    return UIInterfaceOrientationUnknown;
+}
+
+static UIInterfaceOrientation ADDeviceOrientation(void) {
+    switch ([UIDevice currentDevice].orientation) {
+        case UIDeviceOrientationLandscapeLeft:
+            return UIInterfaceOrientationLandscapeRight;
+        case UIDeviceOrientationLandscapeRight:
+            return UIInterfaceOrientationLandscapeLeft;
+        case UIDeviceOrientationPortrait:
+            return UIInterfaceOrientationPortrait;
+        case UIDeviceOrientationPortraitUpsideDown:
+            return UIInterfaceOrientationPortraitUpsideDown;
+        default:
+            return UIInterfaceOrientationUnknown;
+    }
+}
+
 #pragma mark - 布局
 
 - (BOOL)isLandscapeInterface {
-    UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
-    if (@available(iOS 13.0, *)) {
-        UIWindowScene *scene = self.view.window.windowScene;
-        if (scene) {
-            orientation = scene.interfaceOrientation;
-        }
+    UIInterfaceOrientation appOrientation = ADFrontmostAppOrientation();
+    if (appOrientation != UIInterfaceOrientationUnknown) {
+        return UIInterfaceOrientationIsLandscape(appOrientation);
     }
-    if (orientation == UIInterfaceOrientationUnknown) {
-        // 16.5 SDK 上 statusBarOrientation 已 deprecated，这里改用窗口尺寸判断。
-        CGSize screenSize = self.view.window.frame.size;
-        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
-            screenSize = [UIScreen mainScreen].bounds.size;
-        }
-        return screenSize.width > screenSize.height;
+
+    UIInterfaceOrientation deviceOrientation = ADDeviceOrientation();
+    if (deviceOrientation != UIInterfaceOrientationUnknown) {
+        return UIInterfaceOrientationIsLandscape(deviceOrientation);
     }
-    return UIInterfaceOrientationIsLandscape(orientation);
+
+    CGSize windowSize = self.view.window.frame.size;
+    if (windowSize.width <= 0.0 || windowSize.height <= 0.0) {
+        windowSize = self.view.bounds.size;
+    }
+    return windowSize.width > windowSize.height;
+}
+
+- (BOOL)ad_isLandscapeLayout {
+    return [self isLandscapeInterface];
 }
 
 // 收起手势的方向系数：竖屏向上推（负），横屏向下拉（正）。
