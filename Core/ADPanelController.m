@@ -1,11 +1,15 @@
 #import "ADPanelController.h"
 
+#import <CaptainHook/CaptainHook.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 
 #import "../Shared/URLScheme/ADURLScheme.h"
 #import "ADAppCatalog.h"
 #import "ADLauncher.h"
 #import "ADPanelViewController.h"
+
+CHDeclareClass(UIWindow);
 
 #pragma mark - 面板窗口
 
@@ -21,6 +25,8 @@
 @end
 
 #pragma mark - 工具
+
+static ADPanelWindow *ADActivePanelWindow = nil;
 
 static UIWindowScene *ADActiveWindowScene(void) {
     UIApplication *application = [UIApplication sharedApplication];
@@ -47,6 +53,50 @@ static UIWindow *ADKeyWindowOfScene(UIWindowScene *scene) {
         }
     }
     return scene.windows.firstObject;
+}
+
+// 不用已废弃的 UIApplication.keyWindow，自己扫一遍 connectedScenes。
+static UIWindow *ADApplicationKeyWindow(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (scene.activationState != UISceneActivationStateForegroundActive) {
+            continue;
+        }
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.isKeyWindow) {
+                return window;
+            }
+        }
+    }
+    return nil;
+}
+
+// SpringBoard 会时不时把自己的主窗口重新设成 key window，
+// 面板窗口一旦丢 key，键盘就没有落点。这里在别的窗口抢 key 时把面板抢回来。
+CHOptimizedMethod0(self, void, UIWindow, makeKeyWindow) {
+    CHSuper0(UIWindow, makeKeyWindow);
+
+    ADPanelWindow *panelWindow = ADActivePanelWindow;
+    if (panelWindow && self != panelWindow && !panelWindow.hidden && [NSThread isMainThread]) {
+        [panelWindow makeKeyWindow];
+    }
+}
+
+static void ADAttemptPrivateKeyboardFocus(UIWindow *window) {
+    id application = [UIApplication sharedApplication];
+    NSArray<NSString *> *selectors = @[ @"_setKeyboardFocusWindow:", @"setKeyboardFocusWindow:" ];
+    for (NSString *selectorName in selectors) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if ([application respondsToSelector:selector]) {
+            @try {
+                ((void (*)(id, SEL, id))objc_msgSend)(application, selector, window);
+            } @catch (__unused NSException *exception) {
+            }
+            return;
+        }
+    }
 }
 
 static NSString *ADURLQueryValue(NSURL *URL, NSString *name) {
@@ -94,6 +144,11 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 - (instancetype)init {
     self = [super init];
     if (self) {
+        if (NSClassFromString(@"UIWindow")) {
+            CHLoadClass(UIWindow);
+            CHHook0(UIWindow, makeKeyWindow);
+        }
+
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         (__bridge const void *)self,
                                         ADOpenRequestCallback,
@@ -153,6 +208,9 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     _window.hidden = NO;
     [_window makeKeyAndVisible];
     _visible = YES;
+    ADActivePanelWindow = _window;
+
+    ADAttemptPrivateKeyboardFocus(_window);
 
     [_panel setApplications:[ADAppCatalog cachedApplications]];
     [_panel setQuery:query];
@@ -161,6 +219,19 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     [_panel animateIn];
 
     [self _refreshApplications];
+    [self _writeDiagnostics:@"after-show"];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     ADPanelController *strongSelf = weakSelf;
+                     if (!strongSelf || !strongSelf->_visible || !strongSelf->_window) {
+                         return;
+                     }
+                     [strongSelf->_window makeKeyWindow];
+                     ADAttemptPrivateKeyboardFocus(strongSelf->_window);
+                     [strongSelf->_panel focusSearchField];
+                     [strongSelf _writeDiagnostics:@"0.5s-later"];
+                   });
 }
 
 - (void)openApplication:(NSString *)bundleIdentifier {
@@ -205,6 +276,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       }
 
       UIWindow *previousKeyWindow = strongSelf->_previousKeyWindow;
+      ADActivePanelWindow = nil;
       strongSelf->_window.hidden = YES;
       [strongSelf->_window resignKeyWindow];
       strongSelf->_window.rootViewController = nil;
@@ -233,6 +305,44 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
       }
       [strongSelf->_panel setApplications:applications];
     }];
+}
+
+#pragma mark - 诊断
+
+// 面板 / 键盘状态写盘，真机出问题时可以直接用 Filza 打开查看。
+- (void)_writeDiagnostics:(NSString *)stage {
+    @autoreleasepool {
+        UIWindow *applicationKeyWindow = ADApplicationKeyWindow();
+        UIWindowScene *scene = _window.windowScene;
+        UIWindow *sceneKeyWindow = nil;
+        for (UIWindow *window in scene.windows) {
+            if (window.isKeyWindow) {
+                sceneKeyWindow = window;
+            }
+        }
+
+        NSString *report = [NSString stringWithFormat:
+            @"stage=%@\ntime=%@\npanelVisible=%d\nappKeyWindow=%@\npanelWindowIsKey=%d\npanelWindowHidden=%d\nsceneKeyWindow=%@\nsceneWindowCount=%lu\nsearchFieldFirstResponder=%d\n",
+            stage,
+            [NSDate date],
+            (int)_visible,
+            NSStringFromClass([applicationKeyWindow class]),
+            (int)_window.isKeyWindow,
+            (int)_window.hidden,
+            NSStringFromClass([sceneKeyWindow class]),
+            (unsigned long)scene.windows.count,
+            (int)[_panel isSearchFieldFirstResponder]];
+
+        NSString *directory = ADRequestDirectoryPath();
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        [report writeToFile:[directory stringByAppendingPathComponent:@"diag.txt"]
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:NULL];
+    }
 }
 
 #pragma mark - URL 指令
