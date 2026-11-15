@@ -1,0 +1,43 @@
+name: Revert to 1.4.1
+
+# 一次性工作流：由 CI 把 Core/ 与 Shared/ 整份还原到 1.4.1 提交（b17d22a），
+# 高度常量回到 200。触发条件只绑定本文件路径，执行一次后即删除。
+
+on:
+  push:
+    paths:
+      - '.github/workflows/revert-141.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  revert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Restore 1.4.1 sources
+        run: |
+          set -euo pipefail
+          git checkout b17d22ab7fb2cbac0fa80340b871bbe8bfda2e6d -- Core Shared
+          sed -i 's/^Version: .*/Version: 1.4.7/' control
+          sed -i 's/^export PACKAGE_VERSION := .*/export PACKAGE_VERSION := 1.4.7/' Makefile
+          grep -n '^Version:' control
+          grep -n 'PACKAGE_VERSION' Makefile
+          grep -n 'kADPanelMinHeight = ' Core/ADPanelViewController.m
+          git status --short
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "Voring"
+          git config user.email "64722054+Voring@users.noreply.github.com"
+          git add -A
+          git commit -m "1.4.7：全面回退到 1.4.1 源码（高度 200，横竖屏一致）"
+          git push origin HEAD:main
