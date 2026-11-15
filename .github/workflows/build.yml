@@ -14,22 +14,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Theos
+      - name: Install build dependencies
         run: |
           set -euo pipefail
-          brew install ldid xz || true
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          brew install ldid xz dpkg || true
+
+      - name: Setup Theos (roothide)
+        run: |
+          set -euo pipefail
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/toolchain/linux/iphone/bin" >> "$GITHUB_PATH"
 
-      - name: Read package version
+      - name: Install iOS 16.5 SDK
         run: |
           set -euo pipefail
-          VERSION="$(grep -m1 '^Version:' control | awk '{print $2}')"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "package version = ${VERSION}"
+          mkdir -p "$HOME/theos/sdks"
+          curl -fsSL -o "$HOME/theos/sdks/iPhoneOS16.5.sdk.tar.xz" "https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.xz"
+          tar -xf "$HOME/theos/sdks/iPhoneOS16.5.sdk.tar.xz" -C "$HOME/theos/sdks"
 
-      - name: Build package
+      - name: Fix maintainer script permissions
+        run: |
+          set -euo pipefail
+          find . -name '*.sh' -o -name 'postinst' -o -name 'prerm' | xargs -I{} chmod +x {} 2>/dev/null || true
+
+      - name: Build roothide package
         run: |
           set -euo pipefail
           export THEOS="$HOME/theos"
@@ -38,6 +47,23 @@ jobs:
           make package FINALPACKAGE=1 ARCHS=arm64e 2>&1 | tee build-log.txt
           ls -l packages/
 
+      - name: Diagnostics
+        if: always()
+        run: |
+          tail -40 build-log.txt || true
+
+      - name: Publish deb and build log
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B main
+          git add build-log.txt out/latest.deb 2>/dev/null || git add build-log.txt || true
+          git commit -m "ci: build log and deb [skip ci]" || true
+          git pull --rebase origin main || true
+          git push -u origin main || true
+
       - name: Upload deb artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -45,6 +71,14 @@ jobs:
           name: AppDrawer-roothide
           path: packages/*.deb
           if-no-files-found: error
+
+      - name: Read package version
+        if: success()
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '^Version:' control | awk '{print $2}')"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "package version = ${VERSION}"
 
       - name: Release deb
         if: success()
