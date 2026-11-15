@@ -330,7 +330,10 @@ static void ADQueryDiag(NSString *line) {
     CGFloat cardHeight = MIN(preferredHeight, MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight));
     cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
 
-    CGFloat freeSpace = MAX(maxBottom - topLimit - cardHeight, 0.0);
+    // 下移量只看整屏空白，不受键盘影响（键盘弹起时不把面板顶上去）；键盘仅用于下方兜底夹取。
+    // IGNORE_KEYBOARD_FOR_OFFSET
+    CGFloat fullBottom = height - kADPanelEdgeGap;
+    CGFloat freeSpace = MAX(fullBottom - topLimit - cardHeight, 0.0);
     CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);
     CGFloat originY = MIN(topLimit + topOffset, maxBottom - cardHeight);
     originY = MAX(topLimit, originY);
