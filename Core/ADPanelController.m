@@ -305,10 +305,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     _keyboardShown = YES;
 }
 
-- (BOOL)isPanelVisible {
-    return _visible;
-}
-
 #pragma mark - 展示 / 收起
 
 - (void)showPanelWithQuery:(NSString *)query {

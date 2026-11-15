@@ -331,7 +331,6 @@ static void ADQueryDiag(NSString *line) {
     cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
 
     // 下移量只看整屏空白，不受键盘影响（键盘弹起时不把面板顶上去）；键盘仅用于下方兜底夹取。
-    // IGNORE_KEYBOARD_FOR_OFFSET
     CGFloat fullBottom = height - kADPanelEdgeGap;
     CGFloat freeSpace = MAX(fullBottom - topLimit - cardHeight, 0.0);
     CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);
@@ -441,10 +440,6 @@ static void ADQueryDiag(NSString *line) {
     [self.view.window makeKeyWindow];
     [self.searchBar.searchTextField becomeFirstResponder];
     [self.searchBar setShowsCancelButton:YES animated:NO];
-}
-
-- (BOOL)isSearchFieldFirstResponder {
-    return self.searchBar.searchTextField.isFirstResponder;
 }
 
 #pragma mark - 数据
