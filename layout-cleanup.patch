@@ -1,0 +1,158 @@
+diff --git a/Core/ADPanelController.h b/Core/ADPanelController.h
+index d265c7f..6445f38 100644
+--- a/Core/ADPanelController.h
++++ b/Core/ADPanelController.h
+@@ -5,7 +5,6 @@
+ 
+  + (instancetype)sharedController;
+ 
+-- (BOOL)isPanelVisible;
+ - (void)showPanelWithQuery:(NSString *)query;
+ - (void)hidePanel;
+ - (void)hidePanelWithCompletion:(void (^)(void))completion;
+diff --git a/Core/ADPanelController.m b/Core/ADPanelController.m
+index 70bea2d..25a2f97 100644
+--- a/Core/ADPanelController.m
++++ b/Core/ADPanelController.m
+@@ -305,10 +305,6 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
+     _keyboardShown = YES;
+ }
+ 
+-- (BOOL)isPanelVisible {
+-    return _visible;
+-}
+-
+ #pragma mark - 展示 / 收起
+ 
+ - (void)showPanelWithQuery:(NSString *)query {
+diff --git a/Core/ADPanelViewController.h b/Core/ADPanelViewController.h
+index 07ba25b..1b33ee8 100644
+--- a/Core/ADPanelViewController.h
++++ b/Core/ADPanelViewController.h
+@@ -12,7 +12,6 @@
+ 
+ // 把键盘叫到搜索框上（同时也能看出 window 是否真的拿到了 key）。
+ - (void)focusSearchField;
+-- (BOOL)isSearchFieldFirstResponder;
+ 
+ - (void)animateIn;
+ - (void)animateOutWithCompletion:(void (^)(void))completion;
+diff --git a/Core/ADPanelViewController.m b/Core/ADPanelViewController.m
+index 8f4a774..2443e9d 100644
+--- a/Core/ADPanelViewController.m
++++ b/Core/ADPanelViewController.m
+@@ -331,7 +331,6 @@ static void ADQueryDiag(NSString *line) {
+     cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
+ 
+     // 下移量只看整屏空白，不受键盘影响（键盘弹起时不把面板顶上去）；键盘仅用于下方兜底夹取。
+-    // IGNORE_KEYBOARD_FOR_OFFSET
+     CGFloat fullBottom = height - kADPanelEdgeGap;
+     CGFloat freeSpace = MAX(fullBottom - topLimit - cardHeight, 0.0);
+     CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);
+@@ -443,10 +442,6 @@ static void ADQueryDiag(NSString *line) {
+     [self.searchBar setShowsCancelButton:YES animated:NO];
+ }
+ 
+-- (BOOL)isSearchFieldFirstResponder {
+-    return self.searchBar.searchTextField.isFirstResponder;
+-}
+-
+ #pragma mark - 数据
+ 
+ - (void)setApplications:(NSArray<ADAppInfo *> *)applications {
+diff --git a/Core/ADPrefs.h b/Core/ADPrefs.h
+index d2a54a9..e7ff2b6 100644
+--- a/Core/ADPrefs.h
++++ b/Core/ADPrefs.h
+@@ -9,10 +9,7 @@ typedef enum : NSInteger {
+ } ADLauncherMode;
+ 
+ NSInteger ADPrefColumns(void);
+-CGFloat ADPrefPanelHeightPercent(void);
+ CGFloat ADPrefPanelCornerRadius(void);
+ BOOL ADPrefShowSystemApps(void);
+-BOOL ADPrefForceScreenCoreFloating(void);
+ // LauncherMode：0 = ScreenCore 浮窗接口（默认），1 = LaunchServices。
+ ADLauncherMode ADPrefLauncherMode(void);
+-UIBlurEffectStyle ADPrefBlurStyle(void);
+diff --git a/Core/ADPrefs.m b/Core/ADPrefs.m
+index dfe50db..d9989f7 100644
+--- a/Core/ADPrefs.m
++++ b/Core/ADPrefs.m
+@@ -15,15 +15,6 @@ NSInteger ADPrefColumns(void) {
+     return MAX(3, MIN(6, columns));
+ }
+ 
+-CGFloat ADPrefPanelHeightPercent(void) {
+-    id value = ADPreferences()[@"PanelHeightPercent"];
+-    double percent = [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : 0.55;
+-    if (percent > 1.0) {
+-        percent /= 100.0;
+-    }
+-    return MAX(0.35, MIN(0.85, percent));
+-}
+-
+ CGFloat ADPrefPanelCornerRadius(void) {
+     id value = ADPreferences()[@"PanelCornerRadius"];
+     double radius = [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : 28.0;
+@@ -38,14 +29,6 @@ BOOL ADPrefShowSystemApps(void) {
+     return [value boolValue];
+ }
+ 
+-BOOL ADPrefForceScreenCoreFloating(void) {
+-    id value = ADPreferences()[@"ForceScreenCoreFloating"];
+-    if (![value respondsToSelector:@selector(boolValue)]) {
+-        return NO;
+-    }
+-    return [value boolValue];
+-}
+-
+ ADLauncherMode ADPrefLauncherMode(void) {
+     id value = ADPreferences()[@"LauncherMode"];
+     if (![value respondsToSelector:@selector(integerValue)]) {
+@@ -54,20 +37,3 @@ ADLauncherMode ADPrefLauncherMode(void) {
+     return [value integerValue] == ADLauncherModeLaunchServices ? ADLauncherModeLaunchServices
+                                                                : ADLauncherModeScreenCore;
+ }
+-
+-UIBlurEffectStyle ADPrefBlurStyle(void) {
+-    id value = ADPreferences()[@"BlurStyle"];
+-    NSInteger style = [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 0;
+-    switch (style) {
+-        case 1:
+-            return UIBlurEffectStyleSystemMaterialLight;
+-        case 2:
+-            return UIBlurEffectStyleSystemMaterialDark;
+-        case 3:
+-            return UIBlurEffectStyleSystemChromeMaterial;
+-        case 4:
+-            return UIBlurEffectStyleSystemChromeMaterialDark;
+-        default:
+-            return UIBlurEffectStyleSystemMaterial;
+-    }
+-}
+diff --git a/Makefile b/Makefile
+index c17c273..7678100 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-export PACKAGE_VERSION := 1.4.10
++export PACKAGE_VERSION := 1.5.0
+ export ARCHS := arm64e
+ export TARGET := iphone:clang:16.5:16.0
+ export THEOS_PACKAGE_SCHEME ?= roothide
+diff --git a/control b/control
+index 9442a7e..cad445b 100644
+--- a/control
++++ b/control
+@@ -1,8 +1,8 @@
+ Package: com.voring.appdrawer
+ Name: AppDrawer
+-Version: 1.4.10
++Version: 1.5.0
+ Architecture: iphoneos-arm64e
+-Description: 半屏 App 抽屉：URL scheme 唤起，面板高度 390（竖屏两行）；横屏不做分支，同一常量按可用高度自然压缩，宽度封顶 430；位置只由键盘顶边约束。检索只匹配应用名称与拼音，且要求连贯包含。
++Description: 半屏 App 抽屉：URL scheme 唤起，面板高度 200（竖屏单行，横屏同为 200）；下移量按整屏空白等比缩放（封顶 120），不加任何横竖屏判定；宽度封顶 430。检索只匹配应用名称与拼音，且要求连贯包含。
+ Maintainer: Voring
+ Author: Voring
+ Section: Tweaks

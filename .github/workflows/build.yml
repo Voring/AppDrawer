@@ -19,53 +19,21 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      # 一次性补丁 1.4.9：下移量按可用空白等比缩放。已打过则跳过。
-      - name: Apply 1.4.9 layout patch
+      # 一次性：应用 1.5.0 精简补丁（删除零引用的弯路代码）并回写源码。
+      - name: Apply 1.5.0 cleanup patch
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, re, sys
-          p = pathlib.Path('Core/ADPanelViewController.m')
-          src = p.read_text()
-          if 'freeSpace' in src:
-              print('already patched, skip')
-              sys.exit(0)
-          old = "    CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);\n    originY = MAX(topLimit, originY);"
-          new = "    CGFloat freeSpace = MAX(maxBottom - topLimit - cardHeight, 0.0);\n    CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);\n    CGFloat originY = MIN(topLimit + topOffset, maxBottom - cardHeight);\n    originY = MAX(topLimit, originY);"
-          assert src.count(old) == 1, 'layout block not found exactly once'
-          p.write_text(src.replace(old, new))
-          print('patched 1.4.9')
-          PY
-
-      # 一次性补丁 1.4.10：下移量改按「整屏空白」计算，键盘不再把它顶上去。
-      - name: Apply 1.4.10 layout patch
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, re, sys
-          p = pathlib.Path('Core/ADPanelViewController.m')
-          s = p.read_text()
-          if 'IGNORE_KEYBOARD_FOR_OFFSET' in s:
-              print('already patched, skip'); sys.exit(0)
-          old = "    CGFloat freeSpace = MAX(maxBottom - topLimit - cardHeight, 0.0);"
-          new = "    // 下移量只看整屏空白，不受键盘影响（键盘弹起时不把面板顶上去）；键盘仅用于下方兜底夹取。\n    // IGNORE_KEYBOARD_FOR_OFFSET\n    CGFloat fullBottom = height - kADPanelEdgeGap;\n    CGFloat freeSpace = MAX(fullBottom - topLimit - cardHeight, 0.0);"
-          assert s.count(old) == 1, 'freeSpace line not found exactly once'
-          p.write_text(s.replace(old, new))
-          c = pathlib.Path('control'); c.write_text(re.sub(r'^Version: .*', 'Version: 1.4.10', c.read_text(), count=1, flags=re.M))
-          m = pathlib.Path('Makefile'); m.write_text(re.sub(r'^export PACKAGE_VERSION := .*', 'export PACKAGE_VERSION := 1.4.10', m.read_text(), count=1, flags=re.M))
-          print('patched 1.4.10')
-          PY
-          sed -n '330,345p' Core/ADPanelViewController.m
-          grep -n '^Version:' control
-
-      - name: Commit patch back
-        continue-on-error: true
-        run: |
-          set -euo pipefail
+          git apply --verbose layout-cleanup.patch
+          if grep -rn 'isPanelVisible\|ADPrefPanelHeightPercent\|ADPrefBlurStyle\|ADPrefForceScreenCoreFloating\|isSearchFieldFirstResponder' Core Shared; then
+            echo 'dangling reference found'; exit 1
+          else
+            echo 'no dangling refs'
+          fi
+          grep -m1 '^Version:' control
           git config user.name "Voring"
           git config user.email "64722054+Voring@users.noreply.github.com"
-          git add Core/ADPanelViewController.m control Makefile
-          git commit -m "1.4.10：下移量忽略键盘，键盘弹起时竖屏面板不再被顶上去" || true
+          git add Core Makefile control
+          git commit -m "1.5.0：删除零引用的弯路代码（48 行）并更新版本" || true
           git push origin HEAD:main || true
 
       - name: Install build dependencies
@@ -150,11 +118,13 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.4.10** — 竖屏键盘弹起时面板不再被顶上去：下移量的计算改用「整屏空白」，不再受键盘顶边影响；键盘只在面板底边真要压到键盘时做兜底夹取。仍然不做任何方向判定。
+            **1.5.0** — 只删掉测试期间被证实无用的弯路代码，不改任何行为：共 48 行。
 
-            竖屏无键盘与键盘弹起：顶边均为 187（此前键盘弹起会被推到 97）。横屏无键盘仍为 45；横屏键盘弹起时因兜底夹取落在 33（1.4.9 是 13，面板会比之前低 20pt，更贴近键盘）。
+            删除项（全部零引用，删前逐个确认无调用方）：`ADPrefPanelHeightPercent`（早期按屏高百分比的旧高度方案）、`ADPrefForceScreenCoreFloating`、`ADPrefBlurStyle`、`isSearchFieldFirstResponder`（早期键盘诊断残留）、`isPanelVisible`，以及为 CI 补丁幂等而留的标记注释。
 
-            **高度**：`kADPanelMinHeight = 200` 未变。**宽度**、检索均未变。
+            **未动**：布局公式、高度 200、宽度 430 封顶、检索、键盘唤出、场景选取。反汇编与 1.4.10 逐行比对仅相差这些函数的符号。
+
+            **编译**：源码已本地全量编译验证（arm64e 链接由 CI 完成）。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
