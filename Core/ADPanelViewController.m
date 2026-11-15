@@ -33,7 +33,7 @@ static NSString *ADNormalizeText(NSString *raw) {
 
 static CGFloat const kADPanelSideInset = 8.0;
 static CGFloat const kADPanelEdgeGap = 8.0;
-static CGFloat const kADPanelTopOffset = 40.0;
+static CGFloat const kADPanelTopOffset = 120.0;
 static CGFloat const kADPanelMaxWidth = 430.0;
 static CGFloat const kADPanelKeyboardMinHeight = 120.0;
 // 面板固定高度 200：竖屏单行显示，与横屏一致。
