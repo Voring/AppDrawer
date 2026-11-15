@@ -24,7 +24,7 @@ static BOOL ADHandleURLIfMine(NSURL *URL) {
     return YES;
 }
 
-#pragma mark - SpringBoard URL 分发放型
+#pragma mark - SpringBoard URL 分发
 
 CHOptimizedMethod2(self, BOOL, SpringBoard, application, UIApplication *, application, handleOpenURL, NSURL *, url) {
     if (ADHandleURLIfMine(url)) {
@@ -80,15 +80,11 @@ CHOptimizedMethod8(self, BOOL, SpringBoard, applicationOpenURL, NSURL *, url, wi
 CHOptimizedMethod5(self, void, FBSystemService, openApplication, id, application, withOptions, id, options,
                    originator, id, originator, requestID, unsigned int, requestID, completion, id, completion) {
     NSURL *URL = nil;
-    @try {
-        if ([options respondsToSelector:@selector(url)]) {
-            id value = [options performSelector:@selector(url)];
-            if ([value isKindOfClass:[NSURL class]]) {
-                URL = value;
-            }
+    if ([options respondsToSelector:@selector(url)]) {
+        id value = [options performSelector:@selector(url)];
+        if ([value isKindOfClass:[NSURL class]]) {
+            URL = value;
         }
-    } @catch (__unused NSException *exception) {
-        URL = nil;
     }
 
     if (URL && ADHandleURLIfMine(URL)) {

@@ -8,12 +8,10 @@
 #import "ADLauncher.h"
 #import "ADPanelViewController.h"
 
-// 重写版（1.3.0）：
-// 1) 面板窗口仍然用「自己新建一个 SpringBoard 窗口实例」的方式，绝不嵌进 SpringBoard 的 key window。
-// 2) 窗口优先挂到「真正持有键盘窗口的那个场景」，这样 becomeFirstResponder 之后系统才愿意
-//    在这个场景里建立文本输入会话；找不到键盘场景时退回窗口最多的场景（SpringBoard 主场景）。
-// 3) 面板窗口尺寸取所挂场景的坐标空间，横屏时自然得到 852×393。
-// 4) 不做任何同步磁盘写入：诊断行改为后台队列、定长环形（最多 24 行），且只在唤出时写。
+// 面板窗口一律自建、绝不嵌进 SpringBoard 的 key window；
+// 优先挂到「真正持有键盘窗口的那个场景」，这样 becomeFirstResponder 之后系统才愿意
+// 在这个场景里建立文本输入会话；尺寸取所挂场景的坐标空间，横屏自然得到 852×393。
+// 诊断只走后台队列、定长环形（最多 24 行）。
 
 static NSString *const ADPanelTraitsRole = @"SBTraitsParticipantRoleTransientOverlay";
 static NSString *const ADPanelDebugName = @"AppDrawerPanel";
@@ -298,15 +296,11 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (void)_handleKeyboardWillShow:(NSNotification *)notification {
+- (void)_handleKeyboardWillShow:(__unused NSNotification *)notification {
     if (!_visible || !_panel) {
         return;
     }
     _keyboardShown = YES;
-}
-
-- (BOOL)isPanelVisible {
-    return _visible;
 }
 
 #pragma mark - 展示 / 收起
@@ -358,8 +352,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
     [_panel setApplications:[ADAppCatalog cachedApplications]];
     [_panel setQuery:query];
-    [_panel.view setNeedsLayout];
-    [_panel.view layoutIfNeeded];
+    // 布局由 animateIn 内部的 layoutIfNeeded 负责，这里不再重复触发。
     [_panel animateIn];
 
     [self _refreshApplications];
@@ -373,7 +366,7 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
 // 唤出后头两秒里反复把 key 抢回来并重聚焦；键盘通知一到就停手。
 - (void)_scheduleKeyboardFocus {
-    NSArray<NSNumber *> *delays = @[@0.20, @0.45, @0.80, @1.30, @2.00];
+    NSArray<NSNumber *> *delays = @[ @0.20, @0.45, @0.80, @1.30, @2.00 ];
     __weak typeof(self) weakSelf = self;
 
     for (NSNumber *number in delays) {
