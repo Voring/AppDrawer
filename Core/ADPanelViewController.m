@@ -330,7 +330,9 @@ static void ADQueryDiag(NSString *line) {
     CGFloat cardHeight = MIN(preferredHeight, MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight));
     cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
 
-    CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);
+    CGFloat freeSpace = MAX(maxBottom - topLimit - cardHeight, 0.0);
+    CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);
+    CGFloat originY = MIN(topLimit + topOffset, maxBottom - cardHeight);
     originY = MAX(topLimit, originY);
 
     self.dimView.frame = self.view.bounds;
