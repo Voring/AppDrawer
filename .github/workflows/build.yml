@@ -19,21 +19,18 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      # 一次性：应用 1.5.0 精简补丁（删除零引用的弯路代码）并回写源码。
-      - name: Apply 1.5.0 cleanup patch
+      # 一次性：应用 1.6.0 布局补丁（控制区上移、App 从上往下、手势反转）并回写源码。
+      - name: Apply 1.6.0 layout patch
         run: |
           set -euo pipefail
-          git apply --unidiff-zero --verbose layout-cleanup.patch
-          if grep -rn 'isPanelVisible\|ADPrefPanelHeightPercent\|ADPrefBlurStyle\|ADPrefForceScreenCoreFloating\|isSearchFieldFirstResponder' Core Shared; then
-            echo 'dangling reference found'; exit 1
-          else
-            echo 'no dangling refs'
-          fi
+          git apply --unidiff-zero --verbose layout-1.6.0.patch
+          grep -n 'grabberY\|listTop' Core/ADPanelViewController.m | head -5
+          grep -n 'translation.y' Core/ADPanelViewController.m | head -6
           grep -m1 '^Version:' control
           git config user.name "Voring"
           git config user.email "64722054+Voring@users.noreply.github.com"
           git add Core Makefile control
-          git commit -m "1.5.0：删除零引用的弯路代码（48 行）并更新版本" || true
+          git commit -m "1.6.0：控制区移到面板上方，App 从上往下排列，向下拖动关闭" || true
           git push origin HEAD:main || true
 
       - name: Install build dependencies
@@ -118,11 +115,13 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.5.0** — 只删掉测试期间被证实无用的弯路代码，不改任何行为，共 48 行。
+            **1.6.0** — 只动布局顺序与关闭手势，其余全部保留 1.5.0 原样。
 
-            删除项（全部零引用，删前逐个确认无调用方）：`ADPrefPanelHeightPercent`（早期按屏高百分比算高度的旧方案）、`ADPrefForceScreenCoreFloating`、`ADPrefBlurStyle`、`isSearchFieldFirstResponder`（早期键盘诊断残留）、`isPanelVisible`，以及为 CI 补丁幂等而留的标记注释。
+            1. 控制区（抓杆 + 搜索框）从面板下方移到面板上方。
+            2. App 列表不再倒挂，改为从上往下正常排列（控制区在上，列表从搜索框下方往下铺）。
+            3. 关闭手势翻转：向下拖淡出、向下快拖直接关，向上不再触发。
 
-            **未动**：布局公式、高度 200、宽度 430 封顶、检索、键盘唤出、场景选取。源码已本地全量编译通过（arm64e 链接由 CI 完成）。
+            **未动**：高度 200、宽度 430 封顶、下移量公式、键盘唤出与场景选取、检索逻辑；依旧没有任何横竖屏判定，没有 frame/transform 强制改写。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
