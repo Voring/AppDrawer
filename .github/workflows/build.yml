@@ -102,9 +102,15 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            1.4.4：竖屏面板高度 390（两行）。与同批 1.4.5（高度 200、单行）仅高度不同。
+            **1.4.5** — 布局回退到 1.4.2 验收版：竖屏高度 390，两行完美显示。
 
-            本版同时精简了无引用代码与冗余异常处理：移除未再使用的高度百分比/模糊/强制浮窗偏好读取、未调用的 `isPanelVisible`/`isSearchFieldFirstResponder`/`applyFilter`，收敛重复的高度夹取计算，并把两处「已 respondsToSelector 仍包 @try」的冗余保护去掉；私有 API 处的异常防护一律保留。
+            **高度**：唯一常量 `kADPanelHeight = 390`，横竖屏共用。竖屏两行完美显示；横屏不写任何独立分支，同一常量按可用高度自然压缩——横屏无键盘时可用高度约 377，即 `min(390, 377)`，接近满高属几何结果。
+
+            **宽度**：竖屏取满宽，左右各留 8pt 边距并水平居中；横屏同样先取满宽，再由 `kADPanelMaxWidth = 430` 封顶并居中，避免横屏面板过宽。
+
+            **横屏输入法避让**：不做任何横竖屏判定，唯一约束是「面板底边不得越过键盘顶边」：`maxBottom = min(屏幕底边, 键盘顶边 - 8)`；面板高度 = `min(390, max(可用高度, 120))`，其中 120 为 `kADPanelKeyboardMinHeight` 保底，避免键盘很高时把面板压到看不见。横屏键盘更高时，面板由同一条规则自然上推并同时压矮，属几何结果，不是方向分支。
+
+            **安装提示**：装包后请 respring 再唤出。同一版本号重复覆盖安装时，SpringBoard 里常驻的仍是旧 dylib，不 respring 会看起来「新包没生效」。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
