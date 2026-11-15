@@ -1,6 +1,6 @@
 #import "ADURLScheme.h"
 
-static NSString *const ADURLSchemeName = @"appdrawer";
+NSString *const ADURLSchemeName = @"appdrawer";
 NSString *const ADOpenRequestNotification = @"com.voring.appdrawer.openrequest";
 NSString *const ADPreferencesDomain = @"com.voring.appdrawer";
 

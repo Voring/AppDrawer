@@ -9,7 +9,10 @@ typedef enum : NSInteger {
 } ADLauncherMode;
 
 NSInteger ADPrefColumns(void);
+CGFloat ADPrefPanelHeightPercent(void);
 CGFloat ADPrefPanelCornerRadius(void);
 BOOL ADPrefShowSystemApps(void);
+BOOL ADPrefForceScreenCoreFloating(void);
 // LauncherMode：0 = ScreenCore 浮窗接口（默认），1 = LaunchServices。
 ADLauncherMode ADPrefLauncherMode(void);
+UIBlurEffectStyle ADPrefBlurStyle(void);

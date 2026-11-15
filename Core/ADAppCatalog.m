@@ -30,23 +30,22 @@ static NSString *ADStringValue(id object, NSString *selectorName) {
 
 static BOOL ADProxyIsHidden(id proxy) {
     NSArray *tags = nil;
-    SEL selector = NSSelectorFromString(@"appTags");
-    if ([proxy respondsToSelector:selector]) {
-        id value = ((id (*)(id, SEL))objc_msgSend)(proxy, selector);
-        if ([value isKindOfClass:[NSArray class]]) {
-            tags = value;
+    @try {
+        SEL selector = NSSelectorFromString(@"appTags");
+        if ([proxy respondsToSelector:selector]) {
+            id value = ((id (*)(id, SEL))objc_msgSend)(proxy, selector);
+            if ([value isKindOfClass:[NSArray class]]) {
+                tags = value;
+            }
         }
-    }
-    if (!tags) {
-        // KVC 取未声明的 key 会抛，只有这一句需要兜底。
-        @try {
+        if (!tags) {
             id value = [proxy valueForKey:@"tags"];
             if ([value isKindOfClass:[NSArray class]]) {
                 tags = value;
             }
-        } @catch (__unused NSException *exception) {
-            tags = nil;
         }
+    } @catch (__unused NSException *exception) {
+        tags = nil;
     }
 
     for (NSString *tag in tags) {
@@ -108,11 +107,16 @@ static BOOL ADProxyIsHidden(id proxy) {
             }
 
             NSString *type = ADStringValue(proxy, @"applicationType");
-            // 取不到 applicationType 时兜底：系统 App 按 bundle id 前缀区分。
-            BOOL included = type.length > 0
-                                ? ([type isEqualToString:@"User"] ||
-                                   (showSystemApps && [type isEqualToString:@"System"]))
-                                : (showSystemApps || ![bundleIdentifier hasPrefix:@"com.apple."]);
+            BOOL included = NO;
+            if (type.length > 0) {
+                BOOL isUserApplication = [type isEqualToString:@"User"];
+                BOOL isSystemApplication = [type isEqualToString:@"System"];
+                included = isUserApplication || (isSystemApplication && showSystemApps);
+            } else {
+                // applicationType 取不到时的兜底：系统 App 按 bundle id 前缀区分。
+                BOOL looksLikeSystemApp = [bundleIdentifier hasPrefix:@"com.apple."];
+                included = showSystemApps || !looksLikeSystemApp;
+            }
             if (!included) {
                 continue;
             }

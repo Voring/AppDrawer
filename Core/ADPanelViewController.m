@@ -439,6 +439,10 @@ static void ADQueryDiag(NSString *line) {
     [self.searchBar setShowsCancelButton:YES animated:NO];
 }
 
+- (BOOL)isSearchFieldFirstResponder {
+    return self.searchBar.searchTextField.isFirstResponder;
+}
+
 #pragma mark - 数据
 
 - (void)setApplications:(NSArray<ADAppInfo *> *)applications {
@@ -469,6 +473,10 @@ static void ADQueryDiag(NSString *line) {
     }
     self.searchBar.text = text;
     [self applyFilterResettingOffset:YES];
+}
+
+- (void)applyFilter {
+    [self applyFilterResettingOffset:NO];
 }
 
 // 中文输入法在拼音未上屏时，text 属性里通常还看不到这些字母；用 textInRange 取

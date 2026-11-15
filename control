@@ -1,6 +1,6 @@
 Package: com.voring.appdrawer
 Name: AppDrawer
-Version: 1.4.5
+Version: 1.4.6
 Architecture: iphoneos-arm64e
 Description: 半屏 App 抽屉：URL scheme 唤起，面板高度 390（竖屏两行）；横屏不做分支，同一常量按可用高度自然压缩，宽度封顶 430；位置只由键盘顶边约束。检索只匹配应用名称与拼音，且要求连贯包含。
 Maintainer: Voring

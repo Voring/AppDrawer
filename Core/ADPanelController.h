@@ -5,6 +5,7 @@
 
 + (instancetype)sharedController;
 
+- (BOOL)isPanelVisible;
 - (void)showPanelWithQuery:(NSString *)query;
 - (void)hidePanel;
 - (void)hidePanelWithCompletion:(void (^)(void))completion;

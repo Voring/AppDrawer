@@ -6,7 +6,17 @@
 
 #import "ADPrefs.h"
 
-#pragma mark - 参数校验（严格按签名类型，类型不符直接放弃调用）
+#pragma mark - 参数写入（严格按签名类型，类型不符直接放弃调用）
+
+static void ADSetObjectArgument(NSInvocation *invocation, NSUInteger index, id object) {
+    id value = object;
+    [invocation setArgument:&value atIndex:(NSInteger)index];
+}
+
+static void ADSetRectArgument(NSInvocation *invocation, NSUInteger index, CGRect rect) {
+    CGRect value = rect;
+    [invocation setArgument:&value atIndex:(NSInteger)index];
+}
 
 // 校验某个参数位是不是「对象」类型。
 static BOOL ADArgumentIsObject(NSMethodSignature *signature, NSUInteger index) {
@@ -88,11 +98,9 @@ static BOOL ADInvokeOpenSplit(id manager, NSString *bundleIdentifier, CGRect rec
         NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
         invocation.target = manager;
         invocation.selector = selector;
-        id bundleValue = bundleIdentifier;
-        [invocation setArgument:&bundleValue atIndex:2];
+        ADSetObjectArgument(invocation, 2, bundleIdentifier);
         if (withRect) {
-            CGRect rectValue = rect;
-            [invocation setArgument:&rectValue atIndex:3];
+            ADSetRectArgument(invocation, 3, rect);
         }
         [invocation invoke];
 
