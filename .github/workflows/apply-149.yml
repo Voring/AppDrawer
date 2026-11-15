@@ -1,0 +1,58 @@
+name: Apply 1.4.9
+
+# 一次性工作流：把固定下移量改成「可用空白 × 0.208」（上限仍 120），
+# 使下移量随可用空间自然缩放，横屏与键盘弹起时自动收窄，不做任何方向判定。
+# 触发条件绑定本文件路径，执行后即删除。
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-149.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: 下移量改为按可用空白等比缩放
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('Core/ADPanelViewController.m')
+          src = p.read_text()
+          old = """    CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);
+    originY = MAX(topLimit, originY);"""
+          new = """    // 下移量按「可用空白」等比缩放：空白大（竖屏）下移多，空白小（横屏、键盘弹起）自然
+    // 收窄到接近贴顶。上限仍是 kADPanelTopOffset，与朗向无关，不做任何方向判定。
+    CGFloat freeSpace = MAX(maxBottom - topLimit - cardHeight, 0.0);
+    CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);
+    CGFloat originY = MIN(topLimit + topOffset, maxBottom - cardHeight);
+    originY = MAX(topLimit, originY);"""
+          assert src.count(old) == 1, 'layout block not found exactly once'
+          p.write_text(src.replace(old, new))
+          print('patched')
+          PY
+          sed -i 's/^Version: .*/Version: 1.4.9/' control
+          sed -i 's/^export PACKAGE_VERSION := .*/export PACKAGE_VERSION := 1.4.9/' Makefile
+          grep -n 'freeSpace\|topOffset\|kADPanelTopOffset = ' Core/ADPanelViewController.m
+          grep -n '^Version:' control
+          grep -n 'PACKAGE_VERSION' Makefile
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "Voring"
+          git config user.email "64722054+Voring@users.noreply.github.com"
+          git add -A
+          git commit -m "1.4.9：下移量改为按可用空白等比缩放（系数 0.208，封顶 120）"
+          git push origin HEAD:main
