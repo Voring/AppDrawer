@@ -208,8 +208,7 @@ static void ADQueryDiag(NSString *line) {
     _collectionView.dataSource = self;
     _collectionView.delegate = self;
     _collectionView.contentInset = UIEdgeInsetsMake(2.0, 0.0, 16.0, 0.0);
-    // 交互条在最下方，所以列表按「从下往上」铺，第一项贴着搜索框。
-    _collectionView.transform = CGAffineTransformMakeScale(1.0, -1.0);
+    // 控制区在卡片上方，列表按正常顺序「从上往下」铺行。
     [_collectionView registerClass:[ADAppCell class]
         forCellWithReuseIdentifier:ADAppCellReuseIdentifier];
     [_cardView addSubview:_collectionView];
@@ -354,22 +353,24 @@ static void ADQueryDiag(NSString *line) {
     CGFloat cardHeightActual = CGRectGetHeight(self.cardView.bounds);
     CGFloat horizontalInset = 8.0;
 
-    CGFloat grabberY = cardHeightActual - kADGrabberInset - kADGrabberHeight;
+    // 控制区（抓杆 + 搜索框）在卡片上方；列表从搜索框下方往下铺。
+    CGFloat grabberY = kADGrabberInset;
     self.grabberView.frame = CGRectMake(floor((cardWidthActual - kADGrabberWidth) / 2.0),
                                         grabberY,
                                         kADGrabberWidth,
                                         kADGrabberHeight);
 
-    CGFloat searchY = grabberY - 2.0 - kADSearchHeight;
+    CGFloat searchY = grabberY + kADGrabberHeight + 2.0;
     self.searchBar.frame = CGRectMake(horizontalInset,
                                       searchY,
                                       cardWidthActual - horizontalInset * 2.0,
                                       kADSearchHeight);
 
+    CGFloat listTop = searchY + kADSearchHeight;
     self.collectionView.frame = CGRectMake(0.0,
-                                           kADListTopInset,
+                                           listTop,
                                            cardWidthActual,
-                                           MAX(searchY - kADListTopInset, 0.0));
+                                           MAX(cardHeightActual - listTop - kADListTopInset, 0.0));
     self.emptyLabel.frame = CGRectInset(self.collectionView.frame, 24.0, 0.0);
 }
 
@@ -682,15 +683,15 @@ static void ADQueryDiag(NSString *line) {
     }
 
     if (recognizer.state == UIGestureRecognizerStateChanged) {
-        // 收起方向固定为「向上推」。
-        if (translation.y > 0.0 && !_panDidFadeOut) {
+        // 收起方向固定为「向下拖」（控制区在上方，与手势方向一致）。
+        if (translation.y < 0.0 && !_panDidFadeOut) {
             return;
         }
-        CGFloat fadeProgress = MIN(MAX(-translation.y / kADFadeOutDistance, 0.0), 1.0);
+        CGFloat fadeProgress = MIN(MAX(translation.y / kADFadeOutDistance, 0.0), 1.0);
         if (_panDidFadeOut || fadeProgress >= 1.0) {
             _panDidFadeOut = YES;
             fadeProgress = 1.0;
-            translation.y = -kADFadeOutDistance;
+            translation.y = kADFadeOutDistance;
         }
         [UIView animateWithDuration:0.1
                               delay:0.0
@@ -715,7 +716,7 @@ static void ADQueryDiag(NSString *line) {
     }
 
     BOOL fastDismiss = (recognizer.state == UIGestureRecognizerStateEnded) && !_panDidFadeOut &&
-                       translation.y < 0.0 && velocity.y <= -kADFastDismissVelocity;
+                       translation.y > 0.0 && velocity.y >= kADFastDismissVelocity;
     if (_panDidFadeOut || fastDismiss) {
         if (self.onRequestClose) {
             self.onRequestClose();
@@ -749,20 +750,15 @@ static void ADQueryDiag(NSString *line) {
     }
 
     CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.cardView];
-    if (velocity.y >= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
+    if (velocity.y <= 0.0 || fabs(velocity.x) >= fabs(velocity.y)) {
         return NO;
     }
 
     CGPoint location = [gestureRecognizer locationInView:self.cardView];
     if (CGRectContainsPoint(self.collectionView.frame, location)) {
         UIEdgeInsets insets = self.collectionView.adjustedContentInset;
-        CGFloat bottomBoundary =
-            self.collectionView.contentSize.height - CGRectGetHeight(self.collectionView.bounds) +
-            insets.bottom;
-        if (bottomBoundary <= 0.0) {
-            return YES;
-        }
-        return self.collectionView.contentOffset.y >= bottomBoundary - 0.5;
+        // 列表从上往下铺：只有列表已滚到顶部时，向下拖才交给「关面板」。
+        return self.collectionView.contentOffset.y <= -insets.top + 0.5;
     }
     return YES;
 }
@@ -804,7 +800,6 @@ static void ADQueryDiag(NSString *line) {
                   cellForItemAtIndexPath:(NSIndexPath *)indexPath {
     ADAppCell *cell = (ADAppCell *)[collectionView dequeueReusableCellWithReuseIdentifier:ADAppCellReuseIdentifier
                                                                              forIndexPath:indexPath];
-    cell.contentView.transform = CGAffineTransformMakeScale(1.0, -1.0);
     if (indexPath.item < (NSInteger)self.filteredApplications.count) {
         [cell configureWithApplication:self.filteredApplications[indexPath.item]];
     }
