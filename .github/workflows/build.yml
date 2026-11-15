@@ -23,7 +23,7 @@ jobs:
       - name: Apply 1.5.0 cleanup patch
         run: |
           set -euo pipefail
-          git apply --verbose layout-cleanup.patch
+          git apply --unidiff-zero --verbose layout-cleanup.patch
           if grep -rn 'isPanelVisible\|ADPrefPanelHeightPercent\|ADPrefBlurStyle\|ADPrefForceScreenCoreFloating\|isSearchFieldFirstResponder' Core Shared; then
             echo 'dangling reference found'; exit 1
           else
@@ -118,13 +118,11 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.5.0** — 只删掉测试期间被证实无用的弯路代码，不改任何行为：共 48 行。
+            **1.5.0** — 只删掉测试期间被证实无用的弯路代码，不改任何行为，共 48 行。
 
-            删除项（全部零引用，删前逐个确认无调用方）：`ADPrefPanelHeightPercent`（早期按屏高百分比的旧高度方案）、`ADPrefForceScreenCoreFloating`、`ADPrefBlurStyle`、`isSearchFieldFirstResponder`（早期键盘诊断残留）、`isPanelVisible`，以及为 CI 补丁幂等而留的标记注释。
+            删除项（全部零引用，删前逐个确认无调用方）：`ADPrefPanelHeightPercent`（早期按屏高百分比算高度的旧方案）、`ADPrefForceScreenCoreFloating`、`ADPrefBlurStyle`、`isSearchFieldFirstResponder`（早期键盘诊断残留）、`isPanelVisible`，以及为 CI 补丁幂等而留的标记注释。
 
-            **未动**：布局公式、高度 200、宽度 430 封顶、检索、键盘唤出、场景选取。反汇编与 1.4.10 逐行比对仅相差这些函数的符号。
-
-            **编译**：源码已本地全量编译验证（arm64e 链接由 CI 完成）。
+            **未动**：布局公式、高度 200、宽度 430 封顶、检索、键盘唤出、场景选取。源码已本地全量编译通过（arm64e 链接由 CI 完成）。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
