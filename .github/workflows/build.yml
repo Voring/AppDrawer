@@ -102,15 +102,15 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.4.5** — 布局回退到 1.4.2 验收版：竖屏高度 390，两行完美显示。
+            **1.4.6** — 全面回退到 1.4.2：本版 `Core/`、`Shared/` 源码由 CI 直接检出 1.4.2 验收版提交（`fc1677c`）整份还原，此前那轮代码精简已全部撤销，未做任何新的精简。
 
-            **高度**：唯一常量 `kADPanelHeight = 390`，横竖屏共用。竖屏两行完美显示；横屏不写任何独立分支，同一常量按可用高度自然压缩——横屏无键盘时可用高度约 377，即 `min(390, 377)`，接近满高属几何结果。
+            **高度**：唯一常量 `kADPanelHeight = 390`（竖屏两行完美显示）。横屏不写任何独立分支，同一常量按可用高度自然压缩——横屏无键盘时可用高度约 377，即 `min(390, 377)`。
 
-            **宽度**：竖屏取满宽，左右各留 8pt 边距并水平居中；横屏同样先取满宽，再由 `kADPanelMaxWidth = 430` 封顶并居中，避免横屏面板过宽。
+            **宽度**：竖屏取满宽，左右各留 8pt 边距并水平居中；横屏同样先取满宽，再由 `kADPanelMaxWidth = 430` 封顶并居中，保证横屏不会过宽。
 
             **横屏输入法避让**：不做任何横竖屏判定，唯一约束是「面板底边不得越过键盘顶边」：`maxBottom = min(屏幕底边, 键盘顶边 - 8)`；面板高度 = `min(390, max(可用高度, 120))`，其中 120 为 `kADPanelKeyboardMinHeight` 保底，避免键盘很高时把面板压到看不见。横屏键盘更高时，面板由同一条规则自然上推并同时压矮，属几何结果，不是方向分支。
 
-            **安装提示**：装包后请 respring 再唤出。同一版本号重复覆盖安装时，SpringBoard 里常驻的仍是旧 dylib，不 respring 会看起来「新包没生效」。
+            **安装提示**：装包后请 respring 再唤出；同版本号覆盖安装不会让 SpringBoard 换掉内存里的旧 dylib。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
