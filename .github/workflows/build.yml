@@ -19,6 +19,38 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      # 一次性补丁：把固定下移量改为「可用空白 × 0.208」。已打过则跳过，不改动其他内容。
+      - name: Apply 1.4.9 layout patch
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re, sys
+          p = pathlib.Path('Core/ADPanelViewController.m')
+          src = p.read_text()
+          if 'freeSpace' in src:
+              print('already patched, skip')
+              sys.exit(0)
+          old = "    CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);\n    originY = MAX(topLimit, originY);"
+          new = "    CGFloat freeSpace = MAX(maxBottom - topLimit - cardHeight, 0.0);\n    CGFloat topOffset = MIN(kADPanelTopOffset, freeSpace * 0.208);\n    CGFloat originY = MIN(topLimit + topOffset, maxBottom - cardHeight);\n    originY = MAX(topLimit, originY);"
+          assert src.count(old) == 1, 'layout block not found exactly once'
+          p.write_text(src.replace(old, new))
+          c = pathlib.Path('control'); c.write_text(re.sub(r'^Version: .*', 'Version: 1.4.9', c.read_text(), count=1, flags=re.M))
+          m = pathlib.Path('Makefile'); m.write_text(re.sub(r'^export PACKAGE_VERSION := .*', 'export PACKAGE_VERSION := 1.4.9', m.read_text(), count=1, flags=re.M))
+          print('patched -> 1.4.9')
+          PY
+          grep -n 'freeSpace\|topOffset' Core/ADPanelViewController.m
+          grep -n '^Version:' control
+
+      - name: Commit patch back
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git config user.name "Voring"
+          git config user.email "64722054+Voring@users.noreply.github.com"
+          git add Core/ADPanelViewController.m control Makefile
+          git commit -m "1.4.9：下移量按可用空白等比缩放（系数 0.208，封顶 120）" || true
+          git push origin HEAD:main || true
+
       - name: Install build dependencies
         run: brew install ldid xz make
 
@@ -101,13 +133,9 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.4.8** — 只改一个常量：竖屏面板顶部偏移 `kADPanelTopOffset` 由 40 提到 120，面板整体下移约 80pt（顶边约 107pt → 约 187pt）。除该常量外，`Core/`、`Shared/` 全部为 1.4.1 原样，未做任何精简。
+            **1.4.9** — 下移量不再固定，改为按「可用空白」等比缩放：`MIN(120, 空白 × 0.208)`，仍不做任何方向判定。竖屏无键盘空白 577 → 下移 120（顶边 187，同 1.4.8）；横屏无键盘空白 177 → 下移 37（顶边约 45，接近 1.4.1 的 48）；键盘弹起时空白变小，下移自然收窄。
 
-            **高度**：`kADPanelMinHeight = 200`（1.4.1 基线，竖屏单行、横屏同为 200）。
-
-            **宽度**：竖屏取满宽、左右各 8pt 边距并居中；横屏同样满宽，再由 `kADPanelMaxWidth = 430` 封顶居中。
-
-            **键盘避让**：不加任何方向判断，唯一约束是「面板底边不得越过键盘顶边」：`originY = min(topLimit + 120, maxBottom - 200)`，超出时自动夹回，不会压到键盘。
+            **高度**：`kADPanelMinHeight = 200` 未变。**宽度**：未变。其余布局、检索、键盘避让逻辑与 1.4.1 完全一致。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
