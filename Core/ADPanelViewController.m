@@ -328,9 +328,8 @@ static void ADQueryDiag(NSString *line) {
     if (self.keyboardTop > 0.0) {
         maxBottom = MIN(maxBottom, self.keyboardTop - kADPanelEdgeGap);
     }
-    // 可用高度不足下限时抬到下限，再用「窗口高度」做最终夹取（极矮窗口才需要）。
-    CGFloat available = MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight);
-    CGFloat cardHeight = MIN(preferredHeight, MIN(available, height - topLimit - kADPanelEdgeGap));
+    CGFloat cardHeight = MIN(preferredHeight, MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight));
+    cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
 
     CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);
     originY = MAX(topLimit, originY);
