@@ -352,7 +352,8 @@ static void ADOpenRequestCallback(CFNotificationCenterRef center,
 
     [_panel setApplications:[ADAppCatalog cachedApplications]];
     [_panel setQuery:query];
-    // 布局由 animateIn 内部的 layoutIfNeeded 负责，这里不再重复触发。
+    [_panel.view setNeedsLayout];
+    [_panel.view layoutIfNeeded];
     [_panel animateIn];
 
     [self _refreshApplications];
