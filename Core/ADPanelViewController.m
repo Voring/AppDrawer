@@ -328,8 +328,9 @@ static void ADQueryDiag(NSString *line) {
     if (self.keyboardTop > 0.0) {
         maxBottom = MIN(maxBottom, self.keyboardTop - kADPanelEdgeGap);
     }
-    CGFloat cardHeight = MIN(preferredHeight, MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight));
-    cardHeight = MIN(cardHeight, height - topLimit - kADPanelEdgeGap);
+    // 可用高度不足下限时抬到下限，再用「窗口高度」做最终夹取（极矮窗口才需要）。
+    CGFloat available = MAX(maxBottom - topLimit, kADPanelKeyboardMinHeight);
+    CGFloat cardHeight = MIN(preferredHeight, MIN(available, height - topLimit - kADPanelEdgeGap));
 
     CGFloat originY = MIN(topLimit + kADPanelTopOffset, maxBottom - cardHeight);
     originY = MAX(topLimit, originY);
@@ -439,10 +440,6 @@ static void ADQueryDiag(NSString *line) {
     [self.searchBar setShowsCancelButton:YES animated:NO];
 }
 
-- (BOOL)isSearchFieldFirstResponder {
-    return self.searchBar.searchTextField.isFirstResponder;
-}
-
 #pragma mark - 数据
 
 - (void)setApplications:(NSArray<ADAppInfo *> *)applications {
@@ -473,10 +470,6 @@ static void ADQueryDiag(NSString *line) {
     }
     self.searchBar.text = text;
     [self applyFilterResettingOffset:YES];
-}
-
-- (void)applyFilter {
-    [self applyFilterResettingOffset:NO];
 }
 
 // 中文输入法在拼音未上屏时，text 属性里通常还看不到这些字母；用 textInRange 取

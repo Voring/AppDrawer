@@ -102,7 +102,9 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            本版与上版仅有竖屏面板高度的差异，本版高度为 390，完美显示两行。
+            1.4.4：竖屏面板高度 390（两行）。与同批 1.4.5（高度 200、单行）仅高度不同。
+
+            本版同时精简了无引用代码与冗余异常处理：移除未再使用的高度百分比/模糊/强制浮窗偏好读取、未调用的 `isPanelVisible`/`isSearchFieldFirstResponder`/`applyFilter`，收敛重复的高度夹取计算，并把两处「已 respondsToSelector 仍包 @try」的冗余保护去掉；私有 API 处的异常防护一律保留。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
