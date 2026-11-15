@@ -9,7 +9,6 @@
 
 #import <Foundation/Foundation.h>
 
-extern NSString *const ADURLSchemeName;
 extern NSString *const ADOpenRequestNotification;
 extern NSString *const ADPreferencesDomain;
 
