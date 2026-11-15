@@ -5,57 +5,70 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15-intel
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Install build dependencies
-        run: |
-          set -euo pipefail
-          brew install ldid xz dpkg || true
+        run: brew install ldid xz make
 
       - name: Setup Theos (roothide)
         run: |
           set -euo pipefail
           git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/toolchain/linux/iphone/bin" >> "$GITHUB_PATH"
 
       - name: Install iOS 16.5 SDK
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/theos/sdks"
-          curl -fsSL -o "$HOME/theos/sdks/iPhoneOS16.5.sdk.tar.xz" "https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.xz"
-          tar -xf "$HOME/theos/sdks/iPhoneOS16.5.sdk.tar.xz" -C "$HOME/theos/sdks"
+          git clone --filter=blob:none --sparse --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout set iPhoneOS16.5.sdk
+          rm -rf "$HOME/theos/sdks"
+          mv /tmp/sdks "$HOME/theos/sdks"
+          ls "$HOME/theos/sdks"
 
       - name: Fix maintainer script permissions
         run: |
-          set -euo pipefail
-          find . -name '*.sh' -o -name 'postinst' -o -name 'prerm' | xargs -I{} chmod +x {} 2>/dev/null || true
+          chmod 755 layout/DEBIAN/postinst layout/DEBIAN/postrm
+          ls -l layout/DEBIAN
 
       - name: Build roothide package
         run: |
-          set -euo pipefail
+          set -o pipefail
           export THEOS="$HOME/theos"
-          export PATH="$THEOS/toolchain/linux/iphone/bin:$PATH"
-          make clean || true
-          make package FINALPACKAGE=1 ARCHS=arm64e 2>&1 | tee build-log.txt
-          ls -l packages/
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e \
+            TARGET=iphone:clang:16.5:16.0 2>&1 | tee /tmp/build.log
+          exit "${PIPESTATUS[0]}"
 
       - name: Diagnostics
         if: always()
         run: |
-          tail -40 build-log.txt || true
+          pwd
+          echo '--- packages ---'
+          ls -l packages 2>&1 || true
 
       - name: Publish deb and build log
+        if: always()
         continue-on-error: true
         run: |
-          set -euo pipefail
+          mkdir -p out
+          if ls packages/*.deb >/dev/null 2>&1; then
+            cp packages/*.deb out/latest.deb
+          fi
+          {
+            echo "=== BUILD LOG (last 300 lines) ==="
+            tail -n 300 /tmp/build.log 2>/dev/null || echo "no log produced"
+          } | sed 's/[[:cntrl:]]//g' > build-log.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B main
@@ -95,8 +108,6 @@ jobs:
             **宽度**：竖屏取满宽、左右各 8pt 边距并居中；横屏同样满宽，再由 `kADPanelMaxWidth = 430` 封顶居中。
 
             **键盘避让**：不加任何方向判断，唯一约束是「面板底边不得越过键盘顶边」：`originY = min(topLimit + 120, maxBottom - 200)`，超出时自动夹回，不会压到键盘。
-
-            **安装提示**：装包后请 respring 再唤出；同版本号覆盖安装不会让 SpringBoard 换掉内存里的旧 dylib。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
