@@ -5,78 +5,38 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: macos-15-intel
-    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
 
-      - name: Install build dependencies
-        run: brew install ldid xz make
-
-      - name: Setup Theos (roothide)
+      - name: Setup Theos
         run: |
           set -euo pipefail
-          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
+          brew install ldid xz || true
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/toolchain/linux/iphone/bin" >> "$GITHUB_PATH"
 
-      - name: Install iOS 16.5 SDK
+      - name: Read package version
         run: |
           set -euo pipefail
-          git clone --filter=blob:none --sparse --depth 1 https://github.com/theos/sdks.git /tmp/sdks
-          cd /tmp/sdks
-          git sparse-checkout set iPhoneOS16.5.sdk
-          rm -rf "$HOME/theos/sdks"
-          mv /tmp/sdks "$HOME/theos/sdks"
-          ls "$HOME/theos/sdks"
+          VERSION="$(grep -m1 '^Version:' control | awk '{print $2}')"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "package version = ${VERSION}"
 
-      # Git 不保留可执行位时 dm.pl 会报 “bad permissions 644”，这里强制修正。
-      - name: Fix maintainer script permissions
+      - name: Build package
         run: |
-          chmod 755 layout/DEBIAN/postinst layout/DEBIAN/postrm
-          ls -l layout/DEBIAN
-
-      - name: Build roothide package
-        run: |
-          set -o pipefail
+          set -euo pipefail
           export THEOS="$HOME/theos"
-          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e \
-            TARGET=iphone:clang:16.5:16.0 2>&1 | tee /tmp/build.log
-          exit "${PIPESTATUS[0]}"
-
-      - name: Diagnostics
-        if: always()
-        run: |
-          pwd
-          echo '--- packages ---'
-          ls -l packages 2>&1 || true
-
-      - name: Publish deb and build log
-        if: always()
-        continue-on-error: true
-        run: |
-          mkdir -p out
-          if ls packages/*.deb >/dev/null 2>&1; then
-            cp packages/*.deb out/latest.deb
-          fi
-          {
-            echo "=== BUILD LOG (last 300 lines) ==="
-            tail -n 300 /tmp/build.log 2>/dev/null || echo "no log produced"
-          } | sed 's/[[:cntrl:]]//g' > build-log.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B main
-          git add build-log.txt out/latest.deb 2>/dev/null || git add build-log.txt || true
-          git commit -m "ci: build log and deb [skip ci]" || true
-          git pull --rebase origin main || true
-          git push -u origin main || true
+          export PATH="$THEOS/toolchain/linux/iphone/bin:$PATH"
+          make clean || true
+          make package FINALPACKAGE=1 ARCHS=arm64e 2>&1 | tee build-log.txt
+          ls -l packages/
 
       - name: Upload deb artifact
         if: success()
@@ -86,14 +46,6 @@ jobs:
           path: packages/*.deb
           if-no-files-found: error
 
-      - name: Read package version
-        if: success()
-        run: |
-          set -euo pipefail
-          VERSION="$(grep -m1 '^Version:' control | awk '{print $2}')"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "package version = ${VERSION}"
-
       - name: Release deb
         if: success()
         continue-on-error: true
@@ -102,13 +54,13 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.4.6** — 全面回退到 1.4.2：本版 `Core/`、`Shared/` 源码由 CI 直接检出 1.4.2 验收版提交（`fc1677c`）整份还原，此前那轮代码精简已全部撤销，未做任何新的精简。
+            **1.4.8** — 只改一个常量：竖屏面板顶部偏移 `kADPanelTopOffset` 由 40 提到 120，面板整体下移约 80pt（顶边约 107pt → 约 187pt）。除该常量外，`Core/`、`Shared/` 全部为 1.4.1 原样，未做任何精简。
 
-            **高度**：唯一常量 `kADPanelHeight = 390`（竖屏两行完美显示）。横屏不写任何独立分支，同一常量按可用高度自然压缩——横屏无键盘时可用高度约 377，即 `min(390, 377)`。
+            **高度**：`kADPanelMinHeight = 200`（1.4.1 基线，竖屏单行、横屏同为 200）。
 
-            **宽度**：竖屏取满宽，左右各留 8pt 边距并水平居中；横屏同样先取满宽，再由 `kADPanelMaxWidth = 430` 封顶并居中，保证横屏不会过宽。
+            **宽度**：竖屏取满宽、左右各 8pt 边距并居中；横屏同样满宽，再由 `kADPanelMaxWidth = 430` 封顶居中。
 
-            **横屏输入法避让**：不做任何横竖屏判定，唯一约束是「面板底边不得越过键盘顶边」：`maxBottom = min(屏幕底边, 键盘顶边 - 8)`；面板高度 = `min(390, max(可用高度, 120))`，其中 120 为 `kADPanelKeyboardMinHeight` 保底，避免键盘很高时把面板压到看不见。横屏键盘更高时，面板由同一条规则自然上推并同时压矮，属几何结果，不是方向分支。
+            **键盘避让**：不加任何方向判断，唯一约束是「面板底边不得越过键盘顶边」：`originY = min(topLimit + 120, maxBottom - 200)`，超出时自动夹回，不会压到键盘。
 
             **安装提示**：装包后请 respring 再唤出；同版本号覆盖安装不会让 SpringBoard 换掉内存里的旧 dylib。
 
