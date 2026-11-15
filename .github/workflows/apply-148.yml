@@ -1,0 +1,43 @@
+name: Apply 1.4.8
+
+# 一次性工作流：把竖屏面板顶部偏移从 40 改为 120（面板整体下移约 80pt），
+# 版本号提到 1.4.8。只改一个常量，不碰布局公式。触发条件绑定本文件路径，执行后即删除。
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-148.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: 下移竖屏面板顶部偏移
+        run: |
+          set -euo pipefail
+          sed -i 's/static CGFloat const kADPanelTopOffset = 40.0;/static CGFloat const kADPanelTopOffset = 120.0;/' Core/ADPanelViewController.m
+          sed -i 's/^Version: .*/Version: 1.4.8/' control
+          sed -i 's/^export PACKAGE_VERSION := .*/export PACKAGE_VERSION := 1.4.8/' Makefile
+          grep -n 'kADPanelTopOffset = ' Core/ADPanelViewController.m
+          grep -n '^Version:' control
+          grep -n 'PACKAGE_VERSION' Makefile
+          git diff --stat
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "Voring"
+          git config user.email "64722054+Voring@users.noreply.github.com"
+          git add -A
+          git commit -m "1.4.8：竖屏面板顶部偏移 40 -> 120（整体下移约 80pt），仅改一个常量"
+          git push origin HEAD:main
