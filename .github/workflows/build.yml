@@ -19,25 +19,28 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      # 一次性：应用 1.7.0 补丁（修图标线程崩溃 + URL scheme 改纯钩子）并回写源码。
-      # 补丁文件一旦已应用就会在提交里自行删掉，之后重跑这一步直接跳过。
-      - name: Apply 1.7.0 patch
+      # 一次性：以 1.5.0（20a3220）为基准取回代码路径，再打 1.7.0 补丁
+      #（修图标线程崩溃 + URL scheme 改纯钩子），并回写源码。补丁文件应用后会自删，重跑直接跳过。
+      - name: Apply 1.7.0 patch on 1.5.0 base
         run: |
           set -euo pipefail
           if [ ! -f layout-1.7.0.patch ]; then
             echo "patch already applied, skip"
             exit 0
           fi
+          # 基准 = 1.5.0（只取代码路径，不动 .github）
+          git checkout 20a3220ab0314472a91c3520992dbc6cdff597e7 -- Core Shared Makefile control
           git apply --unidiff-zero --verbose layout-1.7.0.patch
           git rm -r -q Handler layout/DEBIAN/postinst layout/DEBIAN/postrm
-          git rm -q --ignore-unmatch layout-cleanup.patch layout-1.6.0.patch VERSION-NOTES.md || true
-          rm -f layout-1.7.0.patch
-          git rm -q --ignore-unmatch layout-1.7.0.patch 2>/dev/null || true
+          git rm -q --ignore-unmatch layout-cleanup.patch layout-1.6.0.patch layout-1.7.0.patch VERSION-NOTES.md
           echo '--- 校验 ---'
           grep -m1 '^Version:' control
+          grep -m1 'PACKAGE_VERSION' Makefile
           grep -c 'ADScreenScale' Core/ADAppInfo.m
           grep -n 'canOpenURL' Core/ADURLDispatchHooks.m | head -3
           test -d Handler && exit 1 || echo 'Handler 已移除'
+          test "$(git hash-object Core/ADPanelViewController.m)" = "$(git rev-parse 20a3220ab0314472a91c3520992dbc6cdff597e7:Core/ADPanelViewController.m)"
+          echo '面板 VC = 1.5.0 原版（UI 未动）'
           if grep -rn 'urlhandler\|ADSubmitOpenRequest\|ADConsumeOpenRequest' Core Shared; then
             echo 'dangling reference'; exit 1
           else
@@ -46,7 +49,7 @@ jobs:
           git config user.name "Voring"
           git config user.email "64722054+Voring@users.noreply.github.com"
           git add -A
-          git commit -m "1.7.0：修复图标线程崩溃（UIScreen 主线程断言）+ URL scheme 改纯 SpringBoard 钩子，移除中转 App"
+          git commit -m "1.7.0：回到 1.5.0 UI 基准，叠加图标崩溃修复 + URL scheme 纯钩子"
           git push origin HEAD:main
 
       - name: Install build dependencies
@@ -132,13 +135,14 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.7.0** — 修掉安全模式，并把 URL scheme 换成纯钩子实现（对齐 Kayoko 二改 / ShellX）。
+            **1.7.0** — 基准 = 1.5.0（UI 原样保留），只叠加崩溃修复与 URL scheme 纯钩子。
 
-            1. **安全模式修复**：图标预加载后台队列里调 `[UIScreen mainScreen]` 会触发主线程断言并 `abort()`，导致 SpringBoard 连续崩 3 次进安全模式（日志 `iconpreload` 队列 → `_iconFromSpringBoardAPI` → `+[UIScreen mainScreen]`）。现改为主线程启动时缓存屏幕倍数，后台只读缓存。
-            2. **URL scheme 纯钩子**：删除 `Handler/` 中转 App（`/Applications/AppDrawerURL.app`，75 KB）与 `uicache` 注册/注销脚本，scheme 不再注册给 LaunchServices；只保留 SpringBoard 内 9 个分发钩子 + 新增 `UIApplication canOpenURL:` 预检钩子。
-            3. **清掉死代码**：`pending.url` 文件通道 + Darwin 通知（约 70 行）、目录里的中转 App 过滤、过期的补丁/说明文件。
+            1. **UI 回到 1.5.0**：控制区在面板下方、App 从下往上排列、向上滑动关闭（`ADPanelViewController.m` 与 1.5.0 逐字节一致，CI 已校验哈希）。上一轮错用了 1.6.0 的 UI，这版纠正。
+            2. **安全模式修复**：图标预加载后台队列调 `[UIScreen mainScreen]` 会触发主线程断言并 `abort()`，导致 SpringBoard 连崩 3 次进安全模式（日志：`iconpreload` 队列 → `_iconFromSpringBoardAPI` → `+[UIScreen mainScreen]`）。改为启动时主线程缓存屏幕倍数，后台只读缓存。
+            3. **URL scheme 纯钩子**：删除 `Handler/` 中转 App（`/Applications/AppDrawerURL.app`，75 KB）与 `uicache` 注册/注销脚本，scheme 不再注册给 LaunchServices；保留 SpringBoard 内分发钩子，并新增 `UIApplication canOpenURL:` 预检钩子。
+            4. **清死代码**：`pending.url` 文件通道 + Darwin 通知（约 70 行）、目录里的中转 App 过滤、过期补丁/说明。
 
-            **未动**：面板高度 200、宽度 430 封顶、下移量公式、键盘唤出、场景选取、检索；依旧没有任何横竖屏判定。UI 沿用 1.6.0（控制区在上、从上往下、下滑关闭）。
+            **未动**：面板高度 200、宽度 430 封顶、下移量公式、键盘唤出、场景选取、检索；依旧没有任何横竖屏判定。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
