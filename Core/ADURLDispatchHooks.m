@@ -9,7 +9,6 @@
 
 CHDeclareClass(SpringBoard);
 CHDeclareClass(FBSystemService);
-CHDeclareClass(LSApplicationWorkspace);
 CHDeclareClass(UIApplication);
 
 #pragma mark - 统一处理
@@ -103,22 +102,6 @@ CHOptimizedMethod5(self, void, FBSystemService, openApplication, id, application
              requestID, requestID, completion, completion);
 }
 
-#pragma mark - LaunchServices 兜底
-
-CHOptimizedMethod2(self, BOOL, LSApplicationWorkspace, openURL, NSURL *, URL, withOptions, id, options) {
-    if (ADHandleURLIfMine(URL)) {
-        return YES;
-    }
-    return CHSuper2(LSApplicationWorkspace, openURL, URL, withOptions, options);
-}
-
-CHOptimizedMethod2(self, BOOL, LSApplicationWorkspace, openSensitiveURL, NSURL *, URL, withOptions, id, options) {
-    if (ADHandleURLIfMine(URL)) {
-        return YES;
-    }
-    return CHSuper2(LSApplicationWorkspace, openSensitiveURL, URL, withOptions, options);
-}
-
 #pragma mark - canOpenURL 预检
 
 // scheme 没有注册给 LaunchServices，任何进程问「谁处理 appdrawer://」系统都会答 NO。
@@ -181,17 +164,6 @@ void ADInstallURLDispatchHooks(void) {
             CHLoadClass_(&UIApplication$, appClass);
             if ([appClass instancesRespondToSelector:@selector(canOpenURL:)]) {
                 CHHook1(UIApplication, canOpenURL);
-            }
-        }
-
-        Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
-        if (workspaceClass) {
-            CHLoadClass_(&LSApplicationWorkspace$, workspaceClass);
-            if ([workspaceClass instancesRespondToSelector:@selector(openURL:withOptions:)]) {
-                CHHook2(LSApplicationWorkspace, openURL, withOptions);
-            }
-            if ([workspaceClass instancesRespondToSelector:@selector(openSensitiveURL:withOptions:)]) {
-                CHHook2(LSApplicationWorkspace, openSensitiveURL, withOptions);
             }
         }
     }
