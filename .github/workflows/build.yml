@@ -19,19 +19,35 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      # 一次性：应用 1.6.0 布局补丁（控制区上移、App 从上往下、手势反转）并回写源码。
-      - name: Apply 1.6.0 layout patch
+      # 一次性：应用 1.7.0 补丁（修图标线程崩溃 + URL scheme 改纯钩子）并回写源码。
+      # 补丁文件一旦已应用就会在提交里自行删掉，之后重跑这一步直接跳过。
+      - name: Apply 1.7.0 patch
         run: |
           set -euo pipefail
-          git apply --unidiff-zero --verbose layout-1.6.0.patch
-          grep -n 'grabberY\|listTop' Core/ADPanelViewController.m | head -5
-          grep -n 'translation.y' Core/ADPanelViewController.m | head -6
+          if [ ! -f layout-1.7.0.patch ]; then
+            echo "patch already applied, skip"
+            exit 0
+          fi
+          git apply --unidiff-zero --verbose layout-1.7.0.patch
+          git rm -r -q Handler layout/DEBIAN/postinst layout/DEBIAN/postrm
+          git rm -q --ignore-unmatch layout-cleanup.patch layout-1.6.0.patch VERSION-NOTES.md || true
+          rm -f layout-1.7.0.patch
+          git rm -q --ignore-unmatch layout-1.7.0.patch 2>/dev/null || true
+          echo '--- 校验 ---'
           grep -m1 '^Version:' control
+          grep -c 'ADScreenScale' Core/ADAppInfo.m
+          grep -n 'canOpenURL' Core/ADURLDispatchHooks.m | head -3
+          test -d Handler && exit 1 || echo 'Handler 已移除'
+          if grep -rn 'urlhandler\|ADSubmitOpenRequest\|ADConsumeOpenRequest' Core Shared; then
+            echo 'dangling reference'; exit 1
+          else
+            echo '无残留引用'
+          fi
           git config user.name "Voring"
           git config user.email "64722054+Voring@users.noreply.github.com"
-          git add Core Makefile control
-          git commit -m "1.6.0：控制区移到面板上方，App 从上往下排列，向下拖动关闭" || true
-          git push origin HEAD:main || true
+          git add -A
+          git commit -m "1.7.0：修复图标线程崩溃（UIScreen 主线程断言）+ URL scheme 改纯 SpringBoard 钩子，移除中转 App"
+          git push origin HEAD:main
 
       - name: Install build dependencies
         run: brew install ldid xz make
@@ -51,10 +67,11 @@ jobs:
           mv /tmp/sdks "$HOME/theos/sdks"
           ls "$HOME/theos/sdks"
 
-      - name: Fix maintainer script permissions
+      - name: Check layout
         run: |
-          chmod 755 layout/DEBIAN/postinst layout/DEBIAN/postrm
-          ls -l layout/DEBIAN
+          set -euo pipefail
+          ls -la layout/DEBIAN || true
+          find layout -name 'postinst' -o -name 'postrm' | while read f; do chmod 755 "$f"; done || true
 
       - name: Build roothide package
         run: |
@@ -115,13 +132,13 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.6.0** — 只动布局顺序与关闭手势，其余全部保留 1.5.0 原样。
+            **1.7.0** — 修掉安全模式，并把 URL scheme 换成纯钩子实现（对齐 Kayoko 二改 / ShellX）。
 
-            1. 控制区（抓杆 + 搜索框）从面板下方移到面板上方。
-            2. App 列表不再倒挂，改为从上往下正常排列（控制区在上，列表从搜索框下方往下铺）。
-            3. 关闭手势翻转：向下拖淡出、向下快拖直接关，向上不再触发。
+            1. **安全模式修复**：图标预加载后台队列里调 `[UIScreen mainScreen]` 会触发主线程断言并 `abort()`，导致 SpringBoard 连续崩 3 次进安全模式（日志 `iconpreload` 队列 → `_iconFromSpringBoardAPI` → `+[UIScreen mainScreen]`）。现改为主线程启动时缓存屏幕倍数，后台只读缓存。
+            2. **URL scheme 纯钩子**：删除 `Handler/` 中转 App（`/Applications/AppDrawerURL.app`，75 KB）与 `uicache` 注册/注销脚本，scheme 不再注册给 LaunchServices；只保留 SpringBoard 内 9 个分发钩子 + 新增 `UIApplication canOpenURL:` 预检钩子。
+            3. **清掉死代码**：`pending.url` 文件通道 + Darwin 通知（约 70 行）、目录里的中转 App 过滤、过期的补丁/说明文件。
 
-            **未动**：高度 200、宽度 430 封顶、下移量公式、键盘唤出与场景选取、检索逻辑；依旧没有任何横竖屏判定，没有 frame/transform 强制改写。
+            **未动**：面板高度 200、宽度 430 封顶、下移量公式、键盘唤出、场景选取、检索；依旧没有任何横竖屏判定。UI 沿用 1.6.0（控制区在上、从上往下、下滑关闭）。
 
             deb: `com.voring.appdrawer_${{ env.VERSION }}_iphoneos-arm64e.deb`
           files: packages/*.deb
