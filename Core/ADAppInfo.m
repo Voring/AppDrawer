@@ -4,6 +4,24 @@
 
 // 图标按「像素面积最大」挑选：LS 的 variant 编号在不同系统上含义并不固定，
 // 逐个试再取最大的一张，才能保证 62pt 的格子拿到足够分辨率、不糊。
+// +[UIScreen mainScreen] 只能在主线程访问：这里存一份主线程写好的倍数，后台只读。
+static CGFloat ADScreenScale = 3.0;
+
+void ADCacheScreenScale(void) {
+    if (![NSThread isMainThread]) {
+        return;
+    }
+    CGFloat scale = 0.0;
+    @try {
+        scale = [UIScreen mainScreen].scale;
+    } @catch (__unused NSException *exception) {
+        scale = 0.0;
+    }
+    if (scale >= 1.0) {
+        ADScreenScale = scale;
+    }
+}
+
 static const unsigned int kADIconMaxVariant = 4;
 static const NSUInteger kADIconGoodEnoughArea = 150 * 150;
 
@@ -119,10 +137,9 @@ static NSUInteger ADImagePixelArea(UIImage *image) {
     IconFunction function = (IconFunction)[[UIImage class] methodForSelector:selector];
 
     // scale 传真实屏幕倍数（3.0）而不是 0.0，才會拿 180px 的 @3x 图。
-    CGFloat scale = [UIScreen mainScreen].scale;
-    if (scale < 2.0) {
-        scale = 3.0;
-    }
+    // 注意：+[UIScreen mainScreen] 带主线程断言，这里跑在 iconpreload 后台队列上，
+    // 直接访问会抛异常把 SpringBoard 打成安全模式，所以只读主线程写好的缓存值。
+    CGFloat scale = ADScreenScale;
 
     @try {
         UIImage *image = function([UIImage class], selector, self.bundleIdentifier, 2, scale);

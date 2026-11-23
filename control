@@ -1,8 +1,8 @@
 Package: com.voring.appdrawer
 Name: AppDrawer
-Version: 1.6.0
+Version: 1.7.0
 Architecture: iphoneos-arm64e
-Description: 半屏 App 抽屉：URL scheme 唤起，面板高度 200（竖屏单行，横屏同为 200）；控制区（抓杆 + 搜索框）位于面板上方，App 从上往下排列，向下拖动关闭；位置下移量按整屏空白等比缩放（封顶 120），不加任何横竖屏判定；宽度封顶 430。检索只匹配应用名称与拼音。
+Description: 半屏 App 抽屉：URL scheme 唤起（纯 SpringBoard 钩子，不注册 scheme、不带中转 App），面板高度 200，控制区在面板上方，App 从上往下排列，向下拖动关闭；下移量按整屏空白等比缩放（封顶 120），无横竖屏判定；宽度封顶 430。检索只匹配应用名称与拼音。
 Maintainer: Voring
 Author: Voring
 Section: Tweaks

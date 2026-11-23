@@ -1,5 +1,8 @@
 #import <UIKit/UIKit.h>
 
+// 只能从主线程调用：把 UIScreen 的 scale 缓存下来，供后台图标预加载读取。
+void ADCacheScreenScale(void);
+
 @interface ADAppInfo : NSObject
 
 @property (nonatomic, copy, readonly) NSString *bundleIdentifier;
