@@ -1,4 +1,4 @@
-export PACKAGE_VERSION := 1.7.0
+export PACKAGE_VERSION := 1.7.1
 export ARCHS := arm64e
 export TARGET := iphone:clang:16.5:16.0
 export THEOS_PACKAGE_SCHEME ?= roothide

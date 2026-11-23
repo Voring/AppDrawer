@@ -127,6 +127,8 @@ static NSUInteger ADImagePixelArea(UIImage *image) {
     return largest;
 }
 
+// 这个私有接口必须在主线程调：它内部在 dispatch_once 里读 +[UIScreen mainScreen]，
+// 后台队列上调用会触发主线程断言 → 抛异常 → abort，SpringBoard 连崩进安全模式。
 - (UIImage *)_iconFromSpringBoardAPI {
     SEL selector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
     if (![[UIImage class] respondsToSelector:selector]) {
@@ -137,19 +139,34 @@ static NSUInteger ADImagePixelArea(UIImage *image) {
     IconFunction function = (IconFunction)[[UIImage class] methodForSelector:selector];
 
     // scale 传真实屏幕倍数（3.0）而不是 0.0，才會拿 180px 的 @3x 图。
-    // 注意：+[UIScreen mainScreen] 带主线程断言，这里跑在 iconpreload 后台队列上，
-    // 直接访问会抛异常把 SpringBoard 打成安全模式，所以只读主线程写好的缓存值。
     CGFloat scale = ADScreenScale;
+    NSString *bundleIdentifier = self.bundleIdentifier;
 
-    @try {
-        UIImage *image = function([UIImage class], selector, self.bundleIdentifier, 2, scale);
-        if (image) {
-            return image;
+    __block UIImage *result = nil;
+    void (^fetch)(void) = ^{
+        @try {
+            UIImage *image = function([UIImage class], selector, bundleIdentifier, 2, scale);
+            if (!image) {
+                image = function([UIImage class], selector, bundleIdentifier, 0, scale);
+            }
+            result = image;
+        } @catch (__unused NSException *exception) {
+            result = nil;
         }
-        return function([UIImage class], selector, self.bundleIdentifier, 0, scale);
-    } @catch (__unused NSException *exception) {
-        return nil;
+    };
+
+    if ([NSThread isMainThread]) {
+        fetch();
+    } else {
+        // 主线程 3 秒内没回话就放弃这张图，不能把 SpringBoard 拖死。
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+          fetch();
+          dispatch_semaphore_signal(semaphore);
+        });
+        dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
     }
+    return result;
 }
 
 - (UIImage *)_loadIcon {
