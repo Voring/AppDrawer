@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -40,6 +40,9 @@ jobs:
           grep -m1 '^Version:' control
           grep -q 'dispatch_semaphore_wait' Core/ADAppInfo.m
           grep -q 'canOpenURL' Core/ADURLDispatchHooks.m
+          if grep -q 'LSApplicationWorkspace' Core/ADURLDispatchHooks.m; then
+            echo '多余的 LS 钩子又回来了'; exit 1
+          fi
           test ! -d Handler
           echo '源码标记齐全'
 
@@ -53,7 +56,12 @@ jobs:
 
       - name: Diagnostics
         if: always()
-        run: ls -l packages 2>&1 || true
+        run: |
+          ls -l packages 2>&1 || true
+          if [ ! -f /tmp/build.log ] || ! ls packages/*.deb >/dev/null 2>&1; then
+            echo '=== BUILD FAILED, tail of log ==='
+            tail -n 60 /tmp/build.log 2>/dev/null || true
+          fi
 
       - name: Upload deb artifact
         if: success()
@@ -69,6 +77,7 @@ jobs:
           set -euo pipefail
           VERSION="$(grep -m1 '^Version:' control | awk '{print $2}')"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          ls -l packages/*.deb
 
       - name: Release deb
         if: success()
@@ -77,10 +86,10 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.7.1** — UI = 1.5.0 原样，叠加：安全模式修复 + URL scheme 纯钩子。
+            **${{ env.VERSION }}** — UI = 1.5.0 原样，叠加：安全模式修复 + URL scheme 纯钩子。
 
             1. **图标崩溃修复**：`iconpreload` 后台队列调用 `+[UIImage _applicationIconImageForBundleIdentifier:format:scale:]`，该接口内部在 `dispatch_once` 里读 `+[UIScreen mainScreen]`（有主线程断言）→ 抛异常 → abort，SpringBoard 连崩 3 次进安全模式。现改为该接口一律回主线程执行（带 3 秒超时，不拖死 SpringBoard），并保留启动时缓存屏幕倍数。
-            2. **URL scheme 纯钩子**：无中转 App、不注册 scheme，只靠 SpringBoard 内分发钩子 + `UIApplication canOpenURL:` 预检钩子。
+            2. **URL scheme 纯钩子**：无中转 App、不注册 scheme；钩子 = Kayoko 那 7 个（6 SpringBoard + FBSystemService）+ `UIApplication canOpenURL:`。1.7.2 起删掉了多余的 2 个 `LSApplicationWorkspace` 钩子。
 
             **未动**：面板布局（控制区在下方、App 从下往上、向上滑动关闭）、高度 200、宽度 430 封顶、下移量公式、键盘唤出、场景选取、检索。
 
