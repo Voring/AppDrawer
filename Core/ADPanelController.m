@@ -235,6 +235,19 @@ static NSString *ADURLQueryValue(NSURL *URL, NSString *name) {
     return nil;
 }
 
+static void ADOpenRequestCallback(CFNotificationCenterRef center,
+                                  void *observer,
+                                  CFStringRef name,
+                                  const void *object,
+                                  CFDictionaryRef userInfo) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSURL *URL = ADConsumeOpenRequest();
+      if (URL) {
+          [[ADPanelController sharedController] handleURL:URL];
+      }
+    });
+}
+
 #pragma mark - 控制器
 
 @implementation ADPanelController {
@@ -257,6 +270,13 @@ static NSString *ADURLQueryValue(NSURL *URL, NSString *name) {
 - (instancetype)init {
     self = [super init];
     if (self) {
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (__bridge const void *)self,
+                                        ADOpenRequestCallback,
+                                        (__bridge CFStringRef)ADOpenRequestNotification,
+                                        NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
         [center addObserver:self
                    selector:@selector(_handleForegroundLoss:)

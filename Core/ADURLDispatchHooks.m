@@ -10,7 +10,6 @@
 CHDeclareClass(SpringBoard);
 CHDeclareClass(FBSystemService);
 CHDeclareClass(LSApplicationWorkspace);
-CHDeclareClass(UIApplication);
 
 #pragma mark - 统一处理
 
@@ -119,17 +118,6 @@ CHOptimizedMethod2(self, BOOL, LSApplicationWorkspace, openSensitiveURL, NSURL *
     return CHSuper2(LSApplicationWorkspace, openSensitiveURL, URL, withOptions, options);
 }
 
-#pragma mark - canOpenURL 预检
-
-// scheme 没有注册给 LaunchServices，任何进程问「谁处理 appdrawer://」系统都会答 NO。
-// 这里在 SpringBoard 进程内把预检改答 YES（与 Kayoko 二改同一做法）。
-CHOptimizedMethod1(self, BOOL, UIApplication, canOpenURL, NSURL *, URL) {
-    if (ADURLIsAppDrawerURL(URL)) {
-        return YES;
-    }
-    return CHSuper1(UIApplication, canOpenURL, URL);
-}
-
 #pragma mark - 安装
 
 void ADInstallURLDispatchHooks(void) {
@@ -173,14 +161,6 @@ void ADInstallURLDispatchHooks(void) {
                 serviceClass, @selector(openApplication:withOptions:originator:requestID:completion:));
             if (openMethod && method_getNumberOfArguments(openMethod) == 7) {
                 CHHook5(FBSystemService, openApplication, withOptions, originator, requestID, completion);
-            }
-        }
-
-        Class appClass = NSClassFromString(@"UIApplication");
-        if (appClass) {
-            CHLoadClass_(&UIApplication$, appClass);
-            if ([appClass instancesRespondToSelector:@selector(canOpenURL:)]) {
-                CHHook1(UIApplication, canOpenURL);
             }
         }
 

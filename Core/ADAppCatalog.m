@@ -96,6 +96,9 @@ static BOOL ADProxyIsHidden(id proxy) {
             if (bundleIdentifier.length == 0) {
                 continue;
             }
+            if ([bundleIdentifier isEqualToString:@"com.voring.appdrawer.urlhandler"]) {
+                continue;
+            }
             if ([seen containsObject:bundleIdentifier]) {
                 continue;
             }
