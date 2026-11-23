@@ -127,8 +127,6 @@ static NSUInteger ADImagePixelArea(UIImage *image) {
     return largest;
 }
 
-// 这个私有接口必须在主线程调：它内部在 dispatch_once 里读 +[UIScreen mainScreen]，
-// 后台队列上调用会触发主线程断言 → 抛异常 → abort，SpringBoard 连崩进安全模式。
 - (UIImage *)_iconFromSpringBoardAPI {
     SEL selector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
     if (![[UIImage class] respondsToSelector:selector]) {
@@ -155,10 +153,14 @@ static NSUInteger ADImagePixelArea(UIImage *image) {
         }
     };
 
+    // 这个接口内部会在 dispatch_once 里调 +[UIScreen mainScreen]（带主线程断言），
+    // 在 iconpreload 后台队列上直接调必然抛异常、abort 把 SpringBoard 打成安全模式
+    //（崩溃栈：iconpreload → _applicationIconImageForBundleIdentifier:format:scale:
+    //  → _iconVariantForUIApplicationIconFormat:idiom:scale: → +[UIScreen mainScreen]）。
+    // 所以一律回主线程执行；主线程 3 秒内没回话就放弃这张图，不能把 SpringBoard 拖死。
     if ([NSThread isMainThread]) {
         fetch();
     } else {
-        // 主线程 3 秒内没回话就放弃这张图，不能把 SpringBoard 拖死。
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_main_queue(), ^{
           fetch();

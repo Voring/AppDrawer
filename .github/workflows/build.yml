@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -15,42 +15,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      # 一次性：main 现在就是 1.5.0 源码（UI 与 1.5.0 逐字节一致），只叠加安全模式修复
-      # 与 URL scheme 纯钩子；补丁应用后自删，重跑直接跳过。
-      - name: Apply 1.7.0 patch
-        run: |
-          set -euo pipefail
-          if grep -q 'ADScreenScale' Core/ADAppInfo.m; then
-            echo 'already patched, skip apply'
-          else
-            test -f layout-1.7.0.patch
-            git apply --unidiff-zero --verbose layout-1.7.0.patch
-          fi
-          git rm -r -q --ignore-unmatch Handler layout/DEBIAN/postinst layout/DEBIAN/postrm \
-            layout-1.7.0.patch layout-cleanup.patch layout-1.6.0.patch VERSION-NOTES.md build-log.txt
-          echo '--- 校验 ---'
-          grep -m1 '^Version:' control
-          grep -m1 'PACKAGE_VERSION' Makefile
-          test "$(grep -c 'ADScreenScale' Core/ADAppInfo.m)" -ge 3
-          grep -q 'canOpenURL' Core/ADURLDispatchHooks.m
-          test ! -d Handler
-          test "$(git hash-object Core/ADPanelViewController.m)" = "$(git rev-parse 20a3220ab0314472a91c3520992dbc6cdff597e7:Core/ADPanelViewController.m)"
-          echo '面板 VC = 1.5.0 原版（UI 未动）'
-          if grep -rn 'urlhandler\|ADSubmitOpenRequest\|ADConsumeOpenRequest' Core Shared; then
-            echo 'dangling reference'; exit 1
-          fi
-          echo '无残留引用'
-          git config user.name "Voring"
-          git config user.email "64722054+Voring@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then echo 'nothing to commit'; else
-            git commit -m "1.7.0：1.5.0 UI 基准 + 图标崩溃修复 + URL scheme 纯钩子"
-            git push origin HEAD:main
-          fi
 
       - name: Install build dependencies
         run: brew install ldid xz make
@@ -70,11 +34,14 @@ jobs:
           mv /tmp/sdks "$HOME/theos/sdks"
           ls "$HOME/theos/sdks"
 
-      - name: Check layout
+      - name: Sanity check sources
         run: |
           set -euo pipefail
-          ls -la layout/DEBIAN || true
-          find layout -name 'postinst' -o -name 'postrm' | while read f; do chmod 755 "$f"; done || true
+          grep -m1 '^Version:' control
+          grep -q 'dispatch_semaphore_wait' Core/ADAppInfo.m
+          grep -q 'canOpenURL' Core/ADURLDispatchHooks.m
+          test ! -d Handler
+          echo '源码标记齐全'
 
       - name: Build roothide package
         run: |
@@ -86,31 +53,7 @@ jobs:
 
       - name: Diagnostics
         if: always()
-        run: |
-          pwd
-          echo '--- packages ---'
-          ls -l packages 2>&1 || true
-
-      - name: Publish deb and build log
-        if: always()
-        continue-on-error: true
-        run: |
-          mkdir -p out
-          if ls packages/*.deb >/dev/null 2>&1; then
-            cp packages/*.deb out/latest.deb
-          fi
-          {
-            echo "=== BUILD LOG (last 300 lines) ==="
-            tail -n 300 /tmp/build.log 2>/dev/null || echo "no log produced"
-          } | sed 's/[[:cntrl:]]//g' > build-log.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B main
-          git add build-log.txt || true
-          [ -f out/latest.deb ] && git add out/latest.deb || true
-          git commit -m "ci: build log and deb [skip ci]" || true
-          git pull --rebase origin main || true
-          git push -u origin main || true
+        run: ls -l packages 2>&1 || true
 
       - name: Upload deb artifact
         if: success()
@@ -126,20 +69,18 @@ jobs:
           set -euo pipefail
           VERSION="$(grep -m1 '^Version:' control | awk '{print $2}')"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "package version = ${VERSION}"
 
       - name: Release deb
         if: success()
-        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: AppDrawer ${{ env.VERSION }} roothide build ${{ github.run_number }}
           body: |
-            **1.7.0** — UI = 1.5.0 原样（CI 已校验 `ADPanelViewController.m` 哈希与 1.5.0 完全一致），只叠加两处修复。
+            **1.7.1** — UI = 1.5.0 原样，叠加：安全模式修复 + URL scheme 纯钩子。
 
-            1. **安全模式修复**：图标预加载后台队列调 `[UIScreen mainScreen]` 触发主线程断言并 `abort()`，SpringBoard 连崩 3 次进安全模式（日志：`iconpreload` 队列 → `_iconFromSpringBoardAPI`）。改为主线程启动时缓存屏幕倍数，后台只读缓存。
-            2. **URL scheme 纯钩子**：删除 `Handler/` 中转 App 与 `uicache` 脚本，scheme 不再注册给 LaunchServices；保留 SpringBoard 分发钩子，新增 `UIApplication canOpenURL:` 预检钩子；清掉 `pending.url` + Darwin 通知通道。
+            1. **图标崩溃修复**：`iconpreload` 后台队列调用 `+[UIImage _applicationIconImageForBundleIdentifier:format:scale:]`，该接口内部在 `dispatch_once` 里读 `+[UIScreen mainScreen]`（有主线程断言）→ 抛异常 → abort，SpringBoard 连崩 3 次进安全模式。现改为该接口一律回主线程执行（带 3 秒超时，不拖死 SpringBoard），并保留启动时缓存屏幕倍数。
+            2. **URL scheme 纯钩子**：无中转 App、不注册 scheme，只靠 SpringBoard 内分发钩子 + `UIApplication canOpenURL:` 预检钩子。
 
             **未动**：面板布局（控制区在下方、App 从下往上、向上滑动关闭）、高度 200、宽度 430 封顶、下移量公式、键盘唤出、场景选取、检索。
 
